@@ -185,7 +185,8 @@ app.registerExtension({
 
         nodeType.prototype.onResize = function () {
             const result = onResize ? onResize.apply(this, arguments) : undefined;
-            if (this.syncMusicalAudioLayout) this.syncMusicalAudioLayout(false);
+            // Legacy DOM widgets re-enter onResize after setSize, so resize only follows width.
+            if (this.syncMusicalAudioWidth) this.syncMusicalAudioWidth();
             return result;
         };
 
@@ -194,8 +195,10 @@ app.registerExtension({
             const result = onConfigure ? onConfigure.apply(this, arguments) : undefined;
             setTimeout(() => {
                 this._configuringMusicalAudio = false;
-                if (this.refreshMusicalAudioUI) this.refreshMusicalAudioUI();
-                if (this.syncMusicalAudioLayout) this.syncMusicalAudioLayout(true);
+                if (this.syncMusicalAudioWidth) this.syncMusicalAudioWidth();
+                if (this.refreshMusicalAudioUI) {
+                    this.refreshMusicalAudioUI(true);
+                }
             }, 0);
             return result;
         };
@@ -309,16 +312,35 @@ app.registerExtension({
             playerTop.append(playerTitle, trimLength);
             container.appendChild(playerTop);
 
-            // 2. HTML audio player.
-            const audioEl = document.createElement("audio");
-            audioEl.controls = true;
-            applyStyle(audioEl, {
+            // 2. HTML audio player. The fixed wrapper keeps native controls out of flex shrink.
+            const playerWrapper = makeElement("div", {
+                display: "block",
                 width: "100%",
                 minWidth: "0",
                 height: "40px",
+                minHeight: "40px",
+                maxHeight: "40px",
+                flex: "0 0 40px",
+                flexShrink: "0",
+                overflow: "visible",
+                boxSizing: "border-box",
+            });
+            const audioEl = document.createElement("audio");
+            audioEl.controls = true;
+            applyStyle(audioEl, {
+                display: "block",
+                width: "100%",
+                minWidth: "0",
+                height: "40px",
+                minHeight: "40px",
+                maxHeight: "40px",
+                flex: "0 0 40px",
+                flexShrink: "0",
+                boxSizing: "border-box",
                 outline: "none",
             });
-            container.appendChild(audioEl);
+            playerWrapper.appendChild(audioEl);
+            container.appendChild(playerWrapper);
 
             // 3. Mode and snap toolbar.
             const toolbar = makeElement("div", {
@@ -544,39 +566,56 @@ app.registerExtension({
             const domWidget = node.addDOMWidget("audio_ui", "audio_ui", container);
             domWidget._contentHeight = 250;
             domWidget.computeSize = function (width) {
-                const nodeWidth = node.size?.[0] || width || 475;
+                const nodeWidth = node.size?.[0] ?? width ?? 475;
                 return [Math.max(10, nodeWidth - 30), Math.max(180, domWidget._contentHeight)];
             };
 
-            let layoutQueued = false;
-            let layoutUpdating = false;
-            node.syncMusicalAudioLayout = function (recomputeHeight = true) {
-                const nodeWidth = this.size?.[0] || 475;
+            let heightSyncQueued = false;
+            let heightSyncUpdating = false;
+            node.syncMusicalAudioWidth = function () {
+                const nodeWidth = this.size?.[0] ?? 475;
                 const targetWidth = Math.max(10, nodeWidth - 30);
                 container.style.width = `${targetWidth}px`;
                 container.style.maxWidth = `${targetWidth}px`;
-                if (!recomputeHeight || layoutQueued) return;
-                layoutQueued = true;
+            };
+            node.scheduleMusicalAudioHeightSync = function () {
+                if (heightSyncQueued || heightSyncUpdating) return;
+                heightSyncQueued = true;
                 requestAnimationFrame(() => {
-                    layoutQueued = false;
+                    heightSyncQueued = false;
+                    if (heightSyncUpdating) return;
+
+                    const previousHeight = container.style.height;
+                    const previousMinHeight = container.style.minHeight;
+                    const previousMaxHeight = container.style.maxHeight;
+                    container.style.height = "max-content";
+                    container.style.minHeight = "0";
+                    container.style.maxHeight = "none";
                     const measured = Math.max(180, Math.ceil(container.scrollHeight) + 10);
+                    container.style.height = previousHeight;
+                    container.style.minHeight = previousMinHeight;
+                    container.style.maxHeight = previousMaxHeight;
+
                     const heightChanged = Math.abs(measured - domWidget._contentHeight) > 1;
                     domWidget._contentHeight = measured;
-                    if (heightChanged && !layoutUpdating) {
-                        layoutUpdating = true;
-                        const widthNow = node.size?.[0] || nodeWidth;
+                    heightSyncUpdating = true;
+                    const widthNow = node.size?.[0] ?? 475;
+                    try {
                         const recommendedHeight = node.computeSize()[1];
-                        if (Math.abs((node.size?.[1] || 0) - recommendedHeight) > 1) {
+                        const nodeHeightChanged = Math.abs((node.size?.[1] ?? 0) - recommendedHeight) > 1;
+                        if (nodeHeightChanged) {
                             node.setSize([widthNow, recommendedHeight]);
                         }
-                        layoutUpdating = false;
-                        appInstance.graph?.setDirtyCanvas(true, true);
+                        if (heightChanged || nodeHeightChanged) {
+                            appInstance.graph?.setDirtyCanvas(true, true);
+                        }
+                    } finally {
+                        heightSyncUpdating = false;
                     }
                 });
             };
 
-            // Preserve the established default width while deriving height from the DOM.
-            node.size = [node.size?.[0] || 475, node.computeSize()[1]];
+            node.syncMusicalAudioWidth();
 
             setTimeout(() => {
                 const widgets = new Map((node.widgets || []).map((candidate) => [candidate.name, candidate]));
@@ -624,6 +663,15 @@ app.registerExtension({
                 const currentSnap = () => SNAP_MODES.includes(widgetValue("snap_mode", "Off"))
                     ? widgetValue("snap_mode", "Off")
                     : "Off";
+
+                const visibleStructureChanged = () => {
+                    const musical = currentMode() === "Musical";
+                    return secondsPanel.style.display !== (musical ? "none" : "grid")
+                        || musicalPanel.style.display !== (musical ? "flex" : "none")
+                        || frameFallbackNote.style.display !== (
+                            musical && currentSnap() === "Video Frame" ? "block" : "none"
+                        );
+                };
 
                 const readTiming = () => {
                     const values = {
@@ -933,13 +981,13 @@ app.registerExtension({
                     }
                 };
 
-                const refreshUI = (seek = false, forceControls = false) => {
+                const refreshUI = (seek = false, forceControls = false, recomputeLayout = false) => {
                     const state = resolveSelection();
                     syncControls(state, forceControls);
                     renderRuler(state);
                     renderSelection(state);
                     if (seek) seekToSelectionStart(state);
-                    node.syncMusicalAudioLayout(true);
+                    if (recomputeLayout) node.scheduleMusicalAudioHeightSync();
                     return state;
                 };
 
@@ -1010,22 +1058,22 @@ app.registerExtension({
                     writeMusicalSelection(startIndex, count);
                 };
 
-                const activeChangeComplete = (seek = true) => {
+                const activeChangeComplete = (seek = true, recomputeLayout = false) => {
                     lastRulerKey = "";
-                    refreshUI(seek, true);
+                    refreshUI(seek, true, recomputeLayout);
                     dirtyGraph(false);
                 };
 
                 for (const [mode, button] of modeButtons) {
                     button.addEventListener("click", () => {
                         setWidgetValue("edit_mode", mode);
-                        activeChangeComplete(true);
+                        activeChangeComplete(true, visibleStructureChanged());
                     });
                 }
                 snapSelect.addEventListener("change", () => {
                     if (!SNAP_MODES.includes(snapSelect.value)) return;
                     setWidgetValue("snap_mode", snapSelect.value);
-                    activeChangeComplete(false);
+                    activeChangeComplete(false, visibleStructureChanged());
                 });
 
                 secondsStartInput.addEventListener("input", () => {
@@ -1200,6 +1248,7 @@ app.registerExtension({
                             writeMusicalSelection(startIndex, state.subdivisionCount);
                         }
                     }
+                    // Pointer movement updates values and visuals only; it never changes structure.
                     activeChangeComplete(true);
                 };
 
@@ -1256,7 +1305,7 @@ app.registerExtension({
                         writeSecondsRange(0, audioDuration, audioDuration);
                         node._shouldResetSecondsTrim = false;
                     }
-                    refreshUI(false, true);
+                    refreshUI(false, true, true);
                     dirtyGraph(false);
                 });
                 audioEl.addEventListener("durationchange", () => {
@@ -1359,7 +1408,7 @@ app.registerExtension({
                             }
                             setTimeout(() => {
                                 lastRulerKey = "";
-                                refreshUI(true, false);
+                                refreshUI(true, false, visibleStructureChanged());
                                 dirtyGraph(false);
                             }, 0);
                         }
@@ -1367,15 +1416,14 @@ app.registerExtension({
                     };
                 }
 
-                node.refreshMusicalAudioUI = () => {
+                node.refreshMusicalAudioUI = (recomputeLayout = false) => {
                     updateAudioSource();
                     lastRulerKey = "";
-                    refreshUI(false, true);
+                    refreshUI(false, true, recomputeLayout);
                 };
 
                 updateAudioSource();
-                refreshUI(false, true);
-                node.syncMusicalAudioLayout(true);
+                refreshUI(false, true, true);
                 setTimeout(() => {
                     node._initializingMusicalAudio = false;
                 }, 500);
