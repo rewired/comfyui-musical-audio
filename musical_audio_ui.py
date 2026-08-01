@@ -9,6 +9,14 @@ except ImportError:  # Support direct module loading outside the package.
     from audio_clip_plan import create_audio_clip_plan
 
 
+_EXTERNAL_INPUT_MISSING = object()
+
+
+def external_or_local(external_value, local_value):
+    """Use an explicitly supplied external value, including falsey values."""
+    return local_value if external_value is _EXTERNAL_INPUT_MISSING else external_value
+
+
 def f32_pcm(wav: torch.Tensor) -> torch.Tensor:
     """Convert audio to float 32 bits PCM format."""
     if wav.dtype.is_floating_point:
@@ -73,28 +81,35 @@ class MusicalLoadAudioUI:
 
         return {
             "required": {
-                "audio": (files, {"audio_upload": True}), # Moved to the top so it appears first
-                "start_time": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100000.0, "step": 0.01}),
-                "end_time": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100000.0, "step": 0.01}),
-                "duration": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100000.0, "step": 0.01}),
-                "edit_mode": (["Seconds", "Musical"], {"default": "Seconds"}),
-                "bpm": ("FLOAT", {"default": 120.0, "min": 0.01, "step": 0.01}),
-                "tempo_unit": (["Quarter", "Eighth", "Dotted Quarter"], {"default": "Quarter"}),
-                "beats_per_bar": ("INT", {"default": 4, "min": 1}),
-                "beat_unit": ("INT", {"default": 4, "min": 1}),
-                "downbeat_offset": ("FLOAT", {"default": 0.0, "step": 0.001}),
-                "fps": ("FLOAT", {"default": 24.0, "min": 0.001, "step": 0.001}),
-                "start_bar": ("INT", {"default": 1, "min": 1}),
-                "start_beat": ("INT", {"default": 1, "min": 1}),
-                "start_subdivision": ("INT", {"default": 0, "min": 0}),
-                "duration_bars": ("INT", {"default": 4, "min": 0}),
-                "duration_beats": ("INT", {"default": 0, "min": 0}),
-                "duration_subdivisions": ("INT", {"default": 0, "min": 0}),
-                "subdivisions_per_beat": ("INT", {"default": 4, "min": 1}),
-                "snap_mode": (["Off", "Bar", "Beat", "Subdivision", "Video Frame"], {"default": "Off"}),
+                "audio": (files, {"audio_upload": True, "socketless": True}), # Moved to the top so it appears first
+                "start_time": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100000.0, "step": 0.01, "socketless": True}),
+                "end_time": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100000.0, "step": 0.01, "socketless": True}),
+                "duration": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100000.0, "step": 0.01, "socketless": True}),
+                "edit_mode": (["Seconds", "Musical"], {"default": "Seconds", "socketless": True}),
+                "bpm": ("FLOAT", {"default": 120.0, "min": 0.01, "step": 0.01, "socketless": True}),
+                "tempo_unit": (["Quarter", "Eighth", "Dotted Quarter"], {"default": "Quarter", "socketless": True}),
+                "beats_per_bar": ("INT", {"default": 4, "min": 1, "socketless": True}),
+                "beat_unit": ("INT", {"default": 4, "min": 1, "socketless": True}),
+                "downbeat_offset": ("FLOAT", {"default": 0.0, "step": 0.001, "socketless": True}),
+                "fps": ("FLOAT", {"default": 24.0, "min": 0.001, "step": 0.001, "socketless": True}),
+                "start_bar": ("INT", {"default": 1, "min": 1, "socketless": True}),
+                "start_beat": ("INT", {"default": 1, "min": 1, "socketless": True}),
+                "start_subdivision": ("INT", {"default": 0, "min": 0, "socketless": True}),
+                "duration_bars": ("INT", {"default": 4, "min": 0, "socketless": True}),
+                "duration_beats": ("INT", {"default": 0, "min": 0, "socketless": True}),
+                "duration_subdivisions": ("INT", {"default": 0, "min": 0, "socketless": True}),
+                "subdivisions_per_beat": ("INT", {"default": 4, "min": 1, "socketless": True}),
+                "snap_mode": (["Off", "Bar", "Beat", "Subdivision", "Video Frame"], {"default": "Off", "socketless": True}),
             },
             "optional": {
-                "audioUI": ("AUDIO_UI",)
+                "audioUI": ("AUDIO_UI", {"socketless": True}),
+                "bpm_input": ("FLOAT", {"forceInput": True}),
+                "tempo_unit_input": ("STRING", {"forceInput": True}),
+                "fps_input": ("FLOAT", {"forceInput": True}),
+                "beats_per_bar_input": ("INT", {"forceInput": True}),
+                "beat_unit_input": ("INT", {"forceInput": True}),
+                "subdivisions_per_beat_input": ("INT", {"forceInput": True}),
+                "downbeat_offset_input": ("FLOAT", {"forceInput": True}),
             }
         }
 
@@ -112,6 +127,8 @@ class MusicalLoadAudioUI:
         "FLOAT",
         "FLOAT",
         "STRING",
+        "FLOAT",
+        "FLOAT",
     )
     RETURN_NAMES = (
         "audio",
@@ -126,6 +143,8 @@ class MusicalLoadAudioUI:
         "seconds_per_bar",
         "frames_per_bar",
         "musical_position",
+        "bpm",
+        "fps",
     )
     FUNCTION = "load_audio"
 
@@ -158,8 +177,29 @@ class MusicalLoadAudioUI:
         duration_subdivisions,
         subdivisions_per_beat,
         snap_mode,
-        **kwargs,
+        audioUI=None,
+        bpm_input=_EXTERNAL_INPUT_MISSING,
+        tempo_unit_input=_EXTERNAL_INPUT_MISSING,
+        fps_input=_EXTERNAL_INPUT_MISSING,
+        beats_per_bar_input=_EXTERNAL_INPUT_MISSING,
+        beat_unit_input=_EXTERNAL_INPUT_MISSING,
+        subdivisions_per_beat_input=_EXTERNAL_INPUT_MISSING,
+        downbeat_offset_input=_EXTERNAL_INPUT_MISSING,
     ):
+        effective_bpm = external_or_local(bpm_input, bpm)
+        effective_tempo_unit = external_or_local(tempo_unit_input, tempo_unit)
+        effective_fps = external_or_local(fps_input, fps)
+        effective_beats_per_bar = external_or_local(beats_per_bar_input, beats_per_bar)
+        effective_beat_unit = external_or_local(beat_unit_input, beat_unit)
+        effective_subdivisions_per_beat = external_or_local(
+            subdivisions_per_beat_input,
+            subdivisions_per_beat,
+        )
+        effective_downbeat_offset = external_or_local(
+            downbeat_offset_input,
+            downbeat_offset,
+        )
+
         # Determine the annotated file path if a file is actually selected
         # We wrap this in a try/except because get_annotated_filepath can fail if 
         # the input string is malformed or doesn't follow expected paths.
@@ -188,7 +228,7 @@ class MusicalLoadAudioUI:
 
         # duration remains a positional compatibility widget, while snap_mode is
         # reserved for the later frontend timeline implementation.
-        _ = duration, snap_mode
+        _ = duration, snap_mode, audioUI
 
         plan = create_audio_clip_plan(
             edit_mode=edit_mode,
@@ -196,19 +236,19 @@ class MusicalLoadAudioUI:
             sample_count=waveform.shape[-1],
             start_time=start_time,
             end_time=end_time,
-            bpm=bpm,
-            tempo_unit=tempo_unit,
-            beats_per_bar=beats_per_bar,
-            beat_unit=beat_unit,
-            downbeat_offset=downbeat_offset,
-            fps=fps,
+            bpm=effective_bpm,
+            tempo_unit=effective_tempo_unit,
+            beats_per_bar=effective_beats_per_bar,
+            beat_unit=effective_beat_unit,
+            downbeat_offset=effective_downbeat_offset,
+            fps=effective_fps,
             start_bar=start_bar,
             start_beat=start_beat,
             start_subdivision=start_subdivision,
             duration_bars=duration_bars,
             duration_beats=duration_beats,
             duration_subdivisions=duration_subdivisions,
-            subdivisions_per_beat=subdivisions_per_beat,
+            subdivisions_per_beat=effective_subdivisions_per_beat,
         )
 
         # Trim the waveform tensor -> shape: [channels, time]
@@ -231,4 +271,6 @@ class MusicalLoadAudioUI:
             plan.seconds_per_bar,
             plan.frames_per_bar,
             plan.musical_position,
+            float(effective_bpm),
+            float(effective_fps),
         )

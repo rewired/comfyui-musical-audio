@@ -372,8 +372,44 @@
     overflow-wrap: anywhere;
 }
 
+.musical-audio-ui .musical-audio-ui__control-wrap {
+    position: relative;
+    display: block;
+    width: 100%;
+    min-width: 0;
+    height: var(--mau-control-height);
+}
+
+.musical-audio-ui .musical-audio-ui__external-badge {
+    position: absolute;
+    top: 3px;
+    right: 4px;
+    z-index: 1;
+    max-width: calc(100% - 8px);
+    overflow: hidden;
+    padding: 1px 3px;
+    color: #d1d5db;
+    background: rgba(55, 65, 81, 0.92);
+    border: 1px solid rgba(156, 163, 175, 0.42);
+    border-radius: 3px;
+    font-size: 7px;
+    font-weight: bold;
+    line-height: 10px;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    pointer-events: none;
+    opacity: 0;
+    visibility: hidden;
+}
+
+.musical-audio-ui .musical-audio-ui__control-wrap.is-external .musical-audio-ui__external-badge {
+    opacity: 1;
+    visibility: visible;
+}
+
 .musical-audio-ui .musical-audio-ui__input,
 .musical-audio-ui .musical-audio-ui__select {
+    display: block;
     width: 100%;
     min-width: 0;
     height: var(--mau-control-height);
@@ -385,6 +421,19 @@
     border-radius: var(--mau-radius-small);
     font-size: 11px;
     outline: none;
+}
+
+.musical-audio-ui .musical-audio-ui__control-wrap.is-external > .musical-audio-ui__input,
+.musical-audio-ui .musical-audio-ui__control-wrap.is-external > .musical-audio-ui__select {
+    color: #c4c8cf;
+    border-color: #343a44;
+    cursor: not-allowed;
+    opacity: 0.58;
+}
+
+.musical-audio-ui .musical-audio-ui__field > .musical-audio-ui__control-wrap.is-external > .musical-audio-ui__input,
+.musical-audio-ui .musical-audio-ui__field > .musical-audio-ui__control-wrap.is-external > .musical-audio-ui__select {
+    padding-right: 48px;
 }
 
 .musical-audio-ui .musical-audio-ui__select {
@@ -607,9 +656,18 @@
 
 .musical-audio-ui .musical-audio-ui__status {
     min-width: 0;
+    overflow: hidden;
     color: var(--mau-muted);
     font-size: 9px;
     line-height: 1.25;
-    white-space: normal;
-    overflow-wrap: anywhere;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.musical-audio-ui.is-legacy-renderer .musical-audio-ui__status {
+    display: block;
+    flex-shrink: 0;
+    min-height: 16px;
+    box-sizing: border-box;
+    line-height: 16px;
 }

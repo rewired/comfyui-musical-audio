@@ -40,6 +40,25 @@ const HIDDEN_WIDGETS = [
     "snap_mode",
 ];
 
+const MUSICAL_TIMING_INPUT_MAP = Object.freeze({
+    bpm: "bpm_input",
+    tempo_unit: "tempo_unit_input",
+    fps: "fps_input",
+    beats_per_bar: "beats_per_bar_input",
+    beat_unit: "beat_unit_input",
+    subdivisions_per_beat: "subdivisions_per_beat_input",
+    downbeat_offset: "downbeat_offset_input",
+});
+const MUSICAL_TIMING_INPUTS = Object.freeze(Object.keys(MUSICAL_TIMING_INPUT_MAP));
+const EXTERNAL_INPUT_LABELS = Object.freeze({
+    bpm_input: "BPM",
+    tempo_unit_input: "Tempo unit",
+    fps_input: "FPS",
+    beats_per_bar_input: "Beats / bar",
+    beat_unit_input: "Beat unit",
+    subdivisions_per_beat_input: "Grid / beat",
+    downbeat_offset_input: "Downbeat offset",
+});
 const TEMPO_UNITS = ["Quarter", "Eighth", "Dotted Quarter"];
 const SNAP_MODES = ["Off", "Bar", "Beat", "Subdivision", "Video Frame"];
 const STORAGE_PRECISION = 1_000_000;
@@ -47,6 +66,12 @@ const STYLESHEET_ID = "comfyui-musical-audio-styles";
 const RESIZE_HEIGHT_SYNC_DELAY_MS = 120;
 const SYNC_FEEDBACK_DURATION_MS = 1800;
 const WIDTH_CHANGE_TOLERANCE_PX = 1;
+const EXTERNAL_PREVIEW_NOTICE = "External timing \u00b7 preview uses local values";
+const EXTERNAL_CONTROL_TITLE = [
+    "Controlled by an external input.",
+    "The displayed value is the saved local fallback used for UI preview.",
+].join("\n");
+const EXTENSION_PATCHED = Symbol.for("comfyui-musical-audio.extension-patched");
 
 function ensureStylesheet() {
     if (document.getElementById(STYLESHEET_ID)) return;
@@ -77,6 +102,37 @@ function hideWidget(widget) {
         widget.draw = () => {};
     }
     if (widget.element) widget.element.style.display = "none";
+}
+
+function applyMusicalAudioInputLabels(node) {
+    if (!node || node._musicalAudioRemoved) return;
+    for (const input of node.inputs || []) {
+        if (!Object.prototype.hasOwnProperty.call(EXTERNAL_INPUT_LABELS, input?.name)) continue;
+        input.label = EXTERNAL_INPUT_LABELS[input.name];
+    }
+}
+
+function matchingMusicalAudioInput(node, widgetName) {
+    const inputName = MUSICAL_TIMING_INPUT_MAP[widgetName];
+    if (!inputName) return null;
+    return (node.inputs || []).find((input) => input?.name === inputName) || null;
+}
+
+function graphContainsLink(graph, linkId) {
+    if (!graph) return true;
+    if (typeof graph.getLink === "function") return Boolean(graph.getLink(linkId));
+    if (graph.links instanceof Map) {
+        return graph.links.has(linkId) && graph.links.get(linkId) != null;
+    }
+    if (graph.links && typeof graph.links === "object") {
+        return graph.links[linkId] != null;
+    }
+    return true;
+}
+
+function isMusicalAudioInputConnected(node, widgetName) {
+    const input = matchingMusicalAudioInput(node, widgetName);
+    return input?.link != null && graphContainsLink(node.graph, input.link);
 }
 
 function clamp(value, minimum, maximum) {
@@ -126,10 +182,25 @@ function compactSelect(values) {
     return select;
 }
 
+function wrapCustomControl(control) {
+    if (control._musicalAudioControlWrap) return control._musicalAudioControlWrap;
+    const wrapper = makeElement("span", "musical-audio-ui__control-wrap");
+    const badge = makeElement(
+        "span",
+        "musical-audio-ui__external-badge",
+        "External",
+    );
+    badge.setAttribute("aria-hidden", "true");
+    wrapper.append(control, badge);
+    control._musicalAudioControlWrap = wrapper;
+    control._musicalAudioExternalBadge = badge;
+    return wrapper;
+}
+
 function makeField(labelText, control) {
     const field = makeElement("label", "musical-audio-ui__field");
     field.appendChild(makeElement("span", "musical-audio-ui__field-label", labelText));
-    field.appendChild(control);
+    field.appendChild(wrapCustomControl(control));
     return field;
 }
 
@@ -180,10 +251,25 @@ app.registerExtension({
     name: "comfyui-musical-audio.MusicalLoadAudioUI",
     async beforeRegisterNodeDef(nodeType, nodeData, appInstance) {
         if (nodeData.name !== "MusicalLoadAudioUI") return;
+        if (nodeType.prototype[EXTENSION_PATCHED]) return;
+
+        // Comfy.UploadAudio injects this frontend-only widget before custom-node
+        // definitions are registered. It must remain a button, not an eighth socket.
+        const uploadConfig = nodeData.input?.required?.upload;
+        if (Array.isArray(uploadConfig)) {
+            uploadConfig[1] ??= {};
+            uploadConfig[1].socketless = true;
+        }
+
+        Object.defineProperty(nodeType.prototype, EXTENSION_PATCHED, {
+            value: true,
+            configurable: false,
+        });
 
         const onNodeCreated = nodeType.prototype.onNodeCreated;
         const onDrawBackground = nodeType.prototype.onDrawBackground;
         const onConfigure = nodeType.prototype.onConfigure;
+        const onConnectionsChange = nodeType.prototype.onConnectionsChange;
         const onResize = nodeType.prototype.onResize;
         const onRemoved = nodeType.prototype.onRemoved;
 
@@ -205,6 +291,7 @@ app.registerExtension({
 
         nodeType.prototype.onRemoved = function () {
             this._musicalAudioRemoved = true;
+            this._musicalAudioExternalRefreshPending = false;
             if (this.cancelMusicalAudioResizeHeightSync) {
                 this.cancelMusicalAudioResizeHeightSync();
             }
@@ -217,7 +304,13 @@ app.registerExtension({
         nodeType.prototype.onConfigure = function () {
             this._configuringMusicalAudio = true;
             const result = onConfigure ? onConfigure.apply(this, arguments) : undefined;
+            applyMusicalAudioInputLabels(this);
             syncOnSwitchEnabled(this);
+            if (this.refreshMusicalAudioExternalState) {
+                this.refreshMusicalAudioExternalState();
+            } else {
+                this._musicalAudioExternalRefreshPending = true;
+            }
             setTimeout(() => {
                 if (this._musicalAudioRemoved) return;
                 this._configuringMusicalAudio = false;
@@ -229,9 +322,22 @@ app.registerExtension({
             return result;
         };
 
+        nodeType.prototype.onConnectionsChange = function () {
+            const result = onConnectionsChange
+                ? onConnectionsChange.apply(this, arguments)
+                : undefined;
+            if (this.refreshMusicalAudioExternalState) {
+                this.refreshMusicalAudioExternalState();
+            } else {
+                this._musicalAudioExternalRefreshPending = true;
+            }
+            return result;
+        };
+
         nodeType.prototype.onNodeCreated = function () {
             const result = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
             const node = this;
+            applyMusicalAudioInputLabels(node);
             syncOnSwitchEnabled(node);
             node._initializingMusicalAudio = true;
             node._shouldResetSecondsTrim = false;
@@ -292,6 +398,8 @@ app.registerExtension({
                 (candidate) => candidate.name === "edit_mode",
             )?.value;
             const container = makeElement("div", "musical-audio-ui");
+            const isLegacyRenderer = !window.LiteGraph || !window.LiteGraph.vueNodesMode;
+            if (isLegacyRenderer) container.classList.add("is-legacy-renderer");
             container.dataset.mode = initialEditMode === "Musical" ? "musical" : "seconds";
 
             // 1. Filename and selection summary.
@@ -447,7 +555,11 @@ app.registerExtension({
             meterDenominator.title = "Meter denominator (beat unit)";
             controlByWidget.set("beats_per_bar", meterNumerator);
             controlByWidget.set("beat_unit", meterDenominator);
-            meterControl.append(meterNumerator, meterDivider, meterDenominator);
+            meterControl.append(
+                wrapCustomControl(meterNumerator),
+                meterDivider,
+                wrapCustomControl(meterDenominator),
+            );
             meterField.appendChild(meterControl);
             meterGridGroup.body.appendChild(meterField);
             const gridDivisions = addNumericControl(
@@ -536,6 +648,50 @@ app.registerExtension({
                 "Seconds · 0.000–0.000 s · Frames 0–0",
             );
             container.appendChild(statusLine);
+
+            const externalPresentationByWidget = new Map();
+            for (const widgetName of MUSICAL_TIMING_INPUTS) {
+                const control = controlByWidget.get(widgetName);
+                if (!control) continue;
+                externalPresentationByWidget.set(widgetName, {
+                    control,
+                    wrapper: control._musicalAudioControlWrap,
+                    originalTitle: control.title,
+                });
+            }
+            let statusBaseText = statusLine.textContent;
+            let hasExternalTiming = false;
+            const updateStatusText = () => {
+                statusLine.textContent = hasExternalTiming
+                    ? `${statusBaseText} \u00b7 ${EXTERNAL_PREVIEW_NOTICE}`
+                    : statusBaseText;
+            };
+            const setStatusBaseText = (text) => {
+                statusBaseText = text;
+                updateStatusText();
+            };
+            node.refreshMusicalAudioExternalState = () => {
+                if (node._musicalAudioRemoved) return;
+                let anyConnected = false;
+                for (const widgetName of MUSICAL_TIMING_INPUTS) {
+                    const presentation = externalPresentationByWidget.get(widgetName);
+                    if (!presentation) continue;
+                    const connected = isMusicalAudioInputConnected(node, widgetName);
+                    anyConnected ||= connected;
+                    presentation.control.disabled = connected;
+                    presentation.wrapper?.classList.toggle("is-external", connected);
+                    if (connected) {
+                        presentation.control.setAttribute("aria-disabled", "true");
+                        presentation.control.title = EXTERNAL_CONTROL_TITLE;
+                    } else {
+                        presentation.control.removeAttribute("aria-disabled");
+                        presentation.control.title = presentation.originalTitle;
+                    }
+                }
+                hasExternalTiming = anyConnected;
+                node._musicalAudioExternalRefreshPending = false;
+                updateStatusText();
+            };
 
             const domWidget = node.addDOMWidget("audio_ui", "audio_ui", container);
             domWidget._contentHeight = 250;
@@ -971,21 +1127,21 @@ app.registerExtension({
                             Math.max(0, state.startIndex),
                             state.timing,
                         );
-                        statusLine.textContent = [
+                        setStatusBaseText([
                             `B${position.bar} · Beat ${position.beat} · Sub ${position.subdivision}`,
                             lengthText,
                             `${state.start.toFixed(3)}–${state.end.toFixed(3)} s`,
                             `Frames ${state.startFrame}–${state.frameEnd}`,
                             state.clamped ? "clamped to audio" : "",
-                        ].filter(Boolean).join(" | ");
+                        ].filter(Boolean).join(" | "));
                     } else {
                         trimLength.textContent = `Trimmed: ${state.selectionDuration.toFixed(3)} s · ${state.frameCount} frames`;
-                        statusLine.textContent = [
+                        setStatusBaseText([
                             "Seconds",
                             `${state.start.toFixed(3)}–${state.end.toFixed(3)} s`,
                             `Frames ${state.startFrame}–${state.frameEnd}`,
                             state.clamped ? "clamped to audio" : "",
-                        ].filter(Boolean).join(" · ");
+                        ].filter(Boolean).join(" · "));
                     }
                 };
 
@@ -998,6 +1154,7 @@ app.registerExtension({
                 const refreshUI = (seek = false, forceControls = false, recomputeLayout = false) => {
                     const state = resolveSelection();
                     syncControls(state, forceControls);
+                    node.refreshMusicalAudioExternalState();
                     renderRuler(state);
                     renderSelection(state);
                     if (seek) seekToSelectionStart(state);
@@ -1497,6 +1654,7 @@ app.registerExtension({
                                 }
                             }
                             setTimeout(() => {
+                                if (node._musicalAudioRemoved) return;
                                 lastRulerKey = "";
                                 refreshUI(true, false, visibleStructureChanged());
                                 dirtyGraph(false);
@@ -1521,6 +1679,7 @@ app.registerExtension({
                 updateAudioSource();
                 refreshUI(false, true, true);
                 setTimeout(() => {
+                    if (node._musicalAudioRemoved) return;
                     node._initializingMusicalAudio = false;
                 }, 500);
             }, 100);
