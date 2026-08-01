@@ -3,6 +3,12 @@ import os
 import torch
 import av
 
+try:
+    from .audio_clip_plan import create_audio_clip_plan
+except ImportError:  # Support direct module loading outside the package.
+    from audio_clip_plan import create_audio_clip_plan
+
+
 def f32_pcm(wav: torch.Tensor) -> torch.Tensor:
     """Convert audio to float 32 bits PCM format."""
     if wav.dtype.is_floating_point:
@@ -35,6 +41,8 @@ def load_audio_file(filepath: str) -> tuple[torch.Tensor, int]:
             raise ValueError("No audio frames decoded.")
 
         wav = torch.cat(frames, dim=1)
+        if wav.shape[-1] == 0:
+            raise ValueError("No audio samples decoded.")
         wav = f32_pcm(wav)
         return wav, sr
 
@@ -69,6 +77,21 @@ class MusicalLoadAudioUI:
                 "start_time": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100000.0, "step": 0.01}),
                 "end_time": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100000.0, "step": 0.01}),
                 "duration": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100000.0, "step": 0.01}),
+                "edit_mode": (["Seconds", "Musical"], {"default": "Seconds"}),
+                "bpm": ("FLOAT", {"default": 120.0, "min": 0.01, "step": 0.01}),
+                "tempo_unit": (["Quarter", "Eighth", "Dotted Quarter"], {"default": "Quarter"}),
+                "beats_per_bar": ("INT", {"default": 4, "min": 1}),
+                "beat_unit": ("INT", {"default": 4, "min": 1}),
+                "downbeat_offset": ("FLOAT", {"default": 0.0, "step": 0.001}),
+                "fps": ("FLOAT", {"default": 24.0, "min": 0.001, "step": 0.001}),
+                "start_bar": ("INT", {"default": 1, "min": 1}),
+                "start_beat": ("INT", {"default": 1, "min": 1}),
+                "start_subdivision": ("INT", {"default": 0, "min": 0}),
+                "duration_bars": ("INT", {"default": 4, "min": 0}),
+                "duration_beats": ("INT", {"default": 0, "min": 0}),
+                "duration_subdivisions": ("INT", {"default": 0, "min": 0}),
+                "subdivisions_per_beat": ("INT", {"default": 4, "min": 1}),
+                "snap_mode": (["Off", "Bar", "Beat", "Subdivision", "Video Frame"], {"default": "Off"}),
             },
             "optional": {
                 "audioUI": ("AUDIO_UI",)
@@ -76,8 +99,34 @@ class MusicalLoadAudioUI:
         }
 
     CATEGORY = "Musical Audio"
-    RETURN_TYPES = ("AUDIO", "FLOAT", "STRING")
-    RETURN_NAMES = ("audio", "duration", "filename")
+    RETURN_TYPES = (
+        "AUDIO",
+        "FLOAT",
+        "STRING",
+        "FLOAT",
+        "FLOAT",
+        "INT",
+        "INT",
+        "FLOAT",
+        "FLOAT",
+        "FLOAT",
+        "FLOAT",
+        "STRING",
+    )
+    RETURN_NAMES = (
+        "audio",
+        "duration",
+        "filename",
+        "start_seconds",
+        "end_seconds",
+        "start_frame",
+        "frame_count",
+        "seconds_per_beat",
+        "frames_per_beat",
+        "seconds_per_bar",
+        "frames_per_bar",
+        "musical_position",
+    )
     FUNCTION = "load_audio"
 
     @classmethod
@@ -88,7 +137,29 @@ class MusicalLoadAudioUI:
         # where our fallback silence logic can handle the missing file gracefully.
         return True
     
-    def load_audio(self, audio, start_time, end_time, duration, **kwargs):
+    def load_audio(
+        self,
+        audio,
+        start_time,
+        end_time,
+        duration,
+        edit_mode,
+        bpm,
+        tempo_unit,
+        beats_per_bar,
+        beat_unit,
+        downbeat_offset,
+        fps,
+        start_bar,
+        start_beat,
+        start_subdivision,
+        duration_bars,
+        duration_beats,
+        duration_subdivisions,
+        subdivisions_per_beat,
+        snap_mode,
+        **kwargs,
+    ):
         # Determine the annotated file path if a file is actually selected
         # We wrap this in a try/except because get_annotated_filepath can fail if 
         # the input string is malformed or doesn't follow expected paths.
@@ -115,32 +186,49 @@ class MusicalLoadAudioUI:
                 sample_rate = 44100
                 waveform = torch.zeros((2, 44100))
 
-        # Convert seconds to frames
-        start_frame = int(start_time * sample_rate)
-        if end_time > 0:
-            end_frame = int(end_time * sample_rate)
-            # Ensure the end_frame does not exceed the actual audio length
-            end_frame = min(end_frame, waveform.shape[1])
-        else:
-            # 0 defaults to the end of the file
-            end_frame = waveform.shape[1]
-            
-        # Ensure start frame stays within bounds and doesn't pass the end frame
-        start_frame = min(start_frame, end_frame)
-        
+        # duration remains a positional compatibility widget, while snap_mode is
+        # reserved for the later frontend timeline implementation.
+        _ = duration, snap_mode
+
+        plan = create_audio_clip_plan(
+            edit_mode=edit_mode,
+            sample_rate=sample_rate,
+            sample_count=waveform.shape[-1],
+            start_time=start_time,
+            end_time=end_time,
+            bpm=bpm,
+            tempo_unit=tempo_unit,
+            beats_per_bar=beats_per_bar,
+            beat_unit=beat_unit,
+            downbeat_offset=downbeat_offset,
+            fps=fps,
+            start_bar=start_bar,
+            start_beat=start_beat,
+            start_subdivision=start_subdivision,
+            duration_bars=duration_bars,
+            duration_beats=duration_beats,
+            duration_subdivisions=duration_subdivisions,
+            subdivisions_per_beat=subdivisions_per_beat,
+        )
+
         # Trim the waveform tensor -> shape: [channels, time]
-        trimmed_waveform = waveform[:, start_frame:end_frame]
-        
-        # Final safety check: if trimming resulted in zero length, give it a tiny bit of padding 
-        # to prevent downstream nodes from crashing on empty tensors
-        if trimmed_waveform.shape[1] == 0:
-            trimmed_waveform = torch.zeros((waveform.shape[0], 1))
+        trimmed_waveform = waveform[:, plan.start_sample:plan.end_sample]
         
         # Format for ComfyUI's standard AUDIO type: [batch, channels, time]
         audio_output = {"waveform": trimmed_waveform.unsqueeze(0), "sample_rate": sample_rate}
-        
-        # Calculate the final trimmed duration in seconds as a float
-        final_duration = float(trimmed_waveform.shape[1] / sample_rate)
-        
+
         out_filename = "" if audio == "none" or not audio_path or not os.path.exists(audio_path) else os.path.basename(audio)
-        return (audio_output, final_duration, out_filename)
+        return (
+            audio_output,
+            plan.duration_seconds,
+            out_filename,
+            plan.start_seconds,
+            plan.end_seconds,
+            plan.start_frame,
+            plan.frame_count,
+            plan.seconds_per_beat,
+            plan.frames_per_beat,
+            plan.seconds_per_bar,
+            plan.frames_per_bar,
+            plan.musical_position,
+        )

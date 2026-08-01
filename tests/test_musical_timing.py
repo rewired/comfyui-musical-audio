@@ -4,7 +4,11 @@ from dataclasses import FrozenInstanceError, is_dataclass
 import math
 import unittest
 
-from musical_timing import MusicalTimingResult, calculate_musical_timing
+from musical_timing import (
+    MusicalTimingResult,
+    calculate_musical_timing,
+    round_half_away_from_zero,
+)
 
 
 BASE_INPUTS = {
@@ -24,6 +28,20 @@ def calculate(**overrides: object) -> MusicalTimingResult:
 
 
 class MusicalTimingCalculationTests(unittest.TestCase):
+    def test_public_rounding_helper_uses_half_away_from_zero(self) -> None:
+        cases = (
+            (0.49, 0),
+            (0.5, 1),
+            (1.5, 2),
+            (-0.49, 0),
+            (-0.5, -1),
+            (-1.5, -2),
+        )
+
+        for value, expected in cases:
+            with self.subTest(value=value):
+                self.assertEqual(round_half_away_from_zero(value), expected)
+
     def test_golden_timing(self) -> None:
         result = calculate(
             bpm=180,

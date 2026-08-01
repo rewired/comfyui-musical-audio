@@ -16,7 +16,7 @@ _TEMPO_UNIT_IN_QUARTERS: dict[str, float] = {
 }
 
 
-def _round_half_away_from_zero(value: float) -> int:
+def round_half_away_from_zero(value: float) -> int:
     """Round to the nearest integer, with exact half ties away from zero."""
     fractional, integral = math.modf(value)
     if fractional >= 0.5:
@@ -152,8 +152,8 @@ def calculate_musical_timing(
 
     frames_per_beat = fps * seconds_per_beat
     frames_per_bar = fps * seconds_per_bar
-    start_frame = _round_half_away_from_zero(start_seconds * fps)
-    frame_count = _round_half_away_from_zero(duration_seconds * fps)
+    start_frame = round_half_away_from_zero(start_seconds * fps)
+    frame_count = round_half_away_from_zero(duration_seconds * fps)
 
     return MusicalTimingResult(
         seconds_per_tempo_pulse=seconds_per_tempo_pulse,
@@ -172,4 +172,9 @@ def calculate_musical_timing(
     )
 
 
-__all__ = ["MusicalTimingResult", "TempoUnit", "calculate_musical_timing"]
+__all__ = [
+    "MusicalTimingResult",
+    "TempoUnit",
+    "calculate_musical_timing",
+    "round_half_away_from_zero",
+]
