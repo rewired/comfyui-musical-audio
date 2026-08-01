@@ -57,7 +57,16 @@ EXPECTED_TARGET_WIDGET_SPECS = {
     "beats_per_bar": ("INT", {"default": 4, "min": 1, "socketless": True}),
     "beat_unit": ("INT", {"default": 4, "min": 1, "socketless": True}),
     "subdivisions_per_beat": ("INT", {"default": 4, "min": 1, "socketless": True}),
-    "downbeat_offset": ("FLOAT", {"default": 0.0, "step": 0.001, "socketless": True}),
+    "downbeat_offset": (
+        "FLOAT",
+        {
+            "default": 0.0,
+            "min": -100000.0,
+            "max": 100000.0,
+            "step": 0.001,
+            "socketless": True,
+        },
+    ),
 }
 ORIGINAL_RETURN_TYPES = (
     "AUDIO",
@@ -193,6 +202,32 @@ class StaticNodeContractTests(unittest.TestCase):
         for widget_name, expected_spec in EXPECTED_TARGET_WIDGET_SPECS.items():
             with self.subTest(widget_name=widget_name):
                 self.assertEqual(_required_input_spec(widget_name), expected_spec)
+
+    def test_downbeat_offset_has_explicit_signed_local_range_only(self) -> None:
+        input_type, options = _required_input_spec("downbeat_offset")
+
+        self.assertEqual(input_type, "FLOAT")
+        self.assertEqual(
+            options,
+            {
+                "default": 0.0,
+                "min": -100000.0,
+                "max": 100000.0,
+                "step": 0.001,
+                "socketless": True,
+            },
+        )
+        self.assertEqual(
+            _required_widget_names().index("downbeat_offset"),
+            EXPECTED_WIDGETS.index("downbeat_offset"),
+        )
+
+        external_spec = ast.literal_eval(
+            _input_group("optional")["downbeat_offset_input"],
+        )
+        self.assertEqual(external_spec, ("FLOAT", {"forceInput": True}))
+        self.assertNotIn("min", external_spec[1])
+        self.assertNotIn("max", external_spec[1])
 
     def test_exact_external_timing_inputs_are_optional_force_inputs(self) -> None:
         optional_inputs = _input_group("optional")

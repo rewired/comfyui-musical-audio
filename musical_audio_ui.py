@@ -90,7 +90,7 @@ class MusicalLoadAudioUI:
                 "tempo_unit": (["Quarter", "Eighth", "Dotted Quarter"], {"default": "Quarter", "socketless": True}),
                 "beats_per_bar": ("INT", {"default": 4, "min": 1, "socketless": True}),
                 "beat_unit": ("INT", {"default": 4, "min": 1, "socketless": True}),
-                "downbeat_offset": ("FLOAT", {"default": 0.0, "step": 0.001, "socketless": True}),
+                "downbeat_offset": ("FLOAT", {"default": 0.0, "min": -100000.0, "max": 100000.0, "step": 0.001, "socketless": True}),
                 "fps": ("FLOAT", {"default": 24.0, "min": 0.001, "step": 0.001, "socketless": True}),
                 "start_bar": ("INT", {"default": 1, "min": 1, "socketless": True}),
                 "start_beat": ("INT", {"default": 1, "min": 1, "socketless": True}),

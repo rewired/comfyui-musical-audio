@@ -17,6 +17,17 @@ import {
     subdivisionIndexToSeconds,
     timingGrid,
 } from "./musical_grid.js";
+import {
+    BEAT_BOUNDARY_EPSILON,
+    isMetronomeDownbeat,
+    metronomeBeatIndexAtOrAfter,
+    metronomeBeatTime,
+    metronomeVolumeGain,
+} from "./metronome.js";
+import {
+    isIntermediateDecimalText,
+    parseLocalizedDecimal,
+} from "./numeric_input.js";
 
 const HIDDEN_WIDGETS = [
     "audioUI",
@@ -65,6 +76,12 @@ const STORAGE_PRECISION = 1_000_000;
 const STYLESHEET_ID = "comfyui-musical-audio-styles";
 const RESIZE_HEIGHT_SYNC_DELAY_MS = 120;
 const SYNC_FEEDBACK_DURATION_MS = 1800;
+const METRONOME_SCHEDULER_INTERVAL_MS = 25;
+const METRONOME_SCHEDULE_AHEAD_SECONDS = 0.12;
+const METRONOME_START_LEAD_SECONDS = 0.003;
+const METRONOME_JUMP_TOLERANCE_SECONDS = 0.075;
+const METRONOME_VOLUME_SETTING_ID = "ComfyUI.MusicalAudio.MetronomeVolume";
+const METRONOME_VOLUME_RAMP_SECONDS = 0.01;
 const WIDTH_CHANGE_TOLERANCE_PX = 1;
 const EXTERNAL_PREVIEW_NOTICE = "External timing \u00b7 preview uses local values";
 const EXTERNAL_CONTROL_TITLE = [
@@ -72,6 +89,25 @@ const EXTERNAL_CONTROL_TITLE = [
     "The displayed value is the saved local fallback used for UI preview.",
 ].join("\n");
 const EXTENSION_PATCHED = Symbol.for("comfyui-musical-audio.extension-patched");
+let sharedMetronomeAudioContext = null;
+const metronomeVolumeTargets = new Set();
+
+function currentMetronomeVolumeGain() {
+    return metronomeVolumeGain(
+        app.extensionManager.setting.get(METRONOME_VOLUME_SETTING_ID),
+    );
+}
+
+function updateMetronomeVolumeTargets(percentage) {
+    const gainMultiplier = metronomeVolumeGain(percentage);
+    for (const updateTarget of [...metronomeVolumeTargets]) {
+        try {
+            updateTarget(gainMultiplier);
+        } catch {
+            // A concurrently removed node must not prevent other buses from updating.
+        }
+    }
+}
 
 function ensureStylesheet() {
     if (document.getElementById(STYLESHEET_ID)) return;
@@ -107,8 +143,10 @@ function hideWidget(widget) {
 function applyMusicalAudioInputLabels(node) {
     if (!node || node._musicalAudioRemoved) return;
     for (const input of node.inputs || []) {
-        if (!Object.prototype.hasOwnProperty.call(EXTERNAL_INPUT_LABELS, input?.name)) continue;
+        const inputName = input?.name;
+        if (!Object.prototype.hasOwnProperty.call(EXTERNAL_INPUT_LABELS, inputName)) continue;
         input.label = EXTERNAL_INPUT_LABELS[input.name];
+        if (inputName === "downbeat_offset_input") input.label = "Downbeat offset (s)";
     }
 }
 
@@ -168,6 +206,14 @@ function makeElement(tag, className = "", text = "") {
 function compactInput(type = "number") {
     const input = makeElement("input", "musical-audio-ui__input");
     input.type = type;
+    return input;
+}
+
+function compactDecimalInput() {
+    const input = compactInput("text");
+    input.inputMode = "decimal";
+    input.autocomplete = "off";
+    input.spellcheck = false;
     return input;
 }
 
@@ -247,8 +293,62 @@ function syncOnSwitchEnabled(node) {
     return node.properties.musical_audio_sync_on_switch;
 }
 
+function metronomeEnabled(node) {
+    if (!node.properties || typeof node.properties !== "object" || Array.isArray(node.properties)) {
+        node.properties = {};
+    }
+    if (typeof node.properties.musical_audio_metronome_enabled !== "boolean") {
+        node.properties.musical_audio_metronome_enabled = false;
+    }
+    return node.properties.musical_audio_metronome_enabled;
+}
+
+async function ensureSharedMetronomeContext(allowCreation) {
+    if (sharedMetronomeAudioContext?.state === "closed") {
+        sharedMetronomeAudioContext = null;
+    }
+    if (!sharedMetronomeAudioContext && allowCreation) {
+        const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextConstructor) return null;
+        try {
+            sharedMetronomeAudioContext = new AudioContextConstructor();
+        } catch {
+            return null;
+        }
+    }
+    const context = sharedMetronomeAudioContext;
+    if (!context) return null;
+    if (context.state === "suspended") {
+        try {
+            await context.resume();
+        } catch {
+            return null;
+        }
+    }
+    return context.state === "running" ? context : null;
+}
+
 app.registerExtension({
     name: "comfyui-musical-audio.MusicalLoadAudioUI",
+    settings: [
+        {
+            id: METRONOME_VOLUME_SETTING_ID,
+            name: "Metronome volume (%)",
+            category: ["Musical Audio", "Metronome"],
+            tooltip: [
+                "Controls the preview metronome volume for all Musical Audio nodes.",
+                "This does not change the loaded audio or node output.",
+            ].join("\n"),
+            type: "slider",
+            attrs: {
+                min: 0,
+                max: 200,
+                step: 5,
+            },
+            defaultValue: 100,
+            onChange: (value) => updateMetronomeVolumeTargets(value),
+        },
+    ],
     async beforeRegisterNodeDef(nodeType, nodeData, appInstance) {
         if (nodeData.name !== "MusicalLoadAudioUI") return;
         if (nodeType.prototype[EXTENSION_PATCHED]) return;
@@ -292,6 +392,9 @@ app.registerExtension({
         nodeType.prototype.onRemoved = function () {
             this._musicalAudioRemoved = true;
             this._musicalAudioExternalRefreshPending = false;
+            if (this.destroyMusicalAudioMetronome) {
+                this.destroyMusicalAudioMetronome();
+            }
             if (this.cancelMusicalAudioResizeHeightSync) {
                 this.cancelMusicalAudioResizeHeightSync();
             }
@@ -306,6 +409,7 @@ app.registerExtension({
             const result = onConfigure ? onConfigure.apply(this, arguments) : undefined;
             applyMusicalAudioInputLabels(this);
             syncOnSwitchEnabled(this);
+            metronomeEnabled(this);
             if (this.refreshMusicalAudioExternalState) {
                 this.refreshMusicalAudioExternalState();
             } else {
@@ -339,6 +443,7 @@ app.registerExtension({
             const node = this;
             applyMusicalAudioInputLabels(node);
             syncOnSwitchEnabled(node);
+            metronomeEnabled(node);
             node._initializingMusicalAudio = true;
             node._shouldResetSecondsTrim = false;
             node._musicalAudioRemoved = false;
@@ -425,7 +530,7 @@ app.registerExtension({
             playerWrapper.appendChild(audioEl);
             container.appendChild(playerWrapper);
 
-            // 3. Mode, synchronization, and snap toolbar.
+            // 3. Mode, synchronization, metronome, and snap toolbar.
             const toolbar = makeElement("div", "musical-audio-ui__toolbar");
             const modeGroup = makeElement("div", "musical-audio-ui__mode-group");
             const modeButtons = new Map();
@@ -446,11 +551,38 @@ app.registerExtension({
             syncSwitch.setAttribute("aria-hidden", "true");
             syncSwitch.appendChild(makeElement("span", "musical-audio-ui__sync-thumb"));
             syncWrap.append(syncLabel, syncInput, syncSwitch);
+            const metronomeWrap = makeElement("label", "musical-audio-ui__metronome");
+            metronomeWrap.title = [
+                "Play a local metronome while previewing audio.",
+                "Clicks follow the saved local timing values.",
+            ].join("\n");
+            const metronomeLabel = makeElement(
+                "span",
+                "musical-audio-ui__metronome-label",
+                "Metronome",
+            );
+            const metronomeInput = makeElement(
+                "input",
+                "musical-audio-ui__metronome-input",
+            );
+            metronomeInput.type = "checkbox";
+            metronomeInput.checked = metronomeEnabled(node);
+            metronomeInput.setAttribute("aria-label", "Enable metronome preview");
+            const metronomeSwitch = makeElement(
+                "span",
+                "musical-audio-ui__metronome-switch",
+            );
+            metronomeSwitch.setAttribute("aria-hidden", "true");
+            metronomeSwitch.appendChild(makeElement(
+                "span",
+                "musical-audio-ui__metronome-thumb",
+            ));
+            metronomeWrap.append(metronomeLabel, metronomeInput, metronomeSwitch);
             const snapWrap = makeElement("label", "musical-audio-ui__snap");
             snapWrap.appendChild(document.createTextNode("Snap"));
             const snapSelect = compactSelect(SNAP_MODES);
             snapWrap.appendChild(snapSelect);
-            toolbar.append(modeGroup, syncWrap, snapWrap);
+            toolbar.append(modeGroup, syncWrap, metronomeWrap, snapWrap);
             container.appendChild(toolbar);
 
             const syncFeedback = makeElement(
@@ -486,9 +618,9 @@ app.registerExtension({
                 "div",
                 "musical-audio-ui__panel musical-audio-ui__panel--seconds",
             );
-            const secondsStartInput = compactInput();
-            const secondsEndInput = compactInput();
-            const secondsDurationInput = compactInput();
+            const secondsStartInput = compactDecimalInput();
+            const secondsEndInput = compactDecimalInput();
+            const secondsDurationInput = compactDecimalInput();
             for (const input of [secondsStartInput, secondsEndInput, secondsDurationInput]) {
                 input.step = "0.000001";
                 input.min = "0";
@@ -509,7 +641,7 @@ app.registerExtension({
             const controlByWidget = new Map();
 
             const addNumericControl = (parent, widgetName, label, options = {}) => {
-                const input = compactInput();
+                const input = options.decimal ? compactDecimalInput() : compactInput();
                 input.step = String(options.step ?? 1);
                 if (options.min !== undefined) input.min = String(options.min);
                 controlByWidget.set(widgetName, input);
@@ -524,9 +656,17 @@ app.registerExtension({
             };
 
             const timingGroup = makeControlGroup("Timing", "timing");
-            addNumericControl(timingGroup.body, "bpm", "BPM", { min: 0.000001, step: 0.01 });
+            addNumericControl(timingGroup.body, "bpm", "BPM", {
+                decimal: true,
+                min: 0.000001,
+                step: 0.01,
+            });
             addSelectControl(timingGroup.body, "tempo_unit", "Tempo unit", TEMPO_UNITS);
-            addNumericControl(timingGroup.body, "fps", "FPS", { min: 0.000001, step: 0.001 });
+            addNumericControl(timingGroup.body, "fps", "FPS", {
+                decimal: true,
+                min: 0.000001,
+                step: 0.001,
+            });
 
             const meterGridGroup = makeControlGroup("Meter & Grid", "meter-grid");
             const meterField = makeElement(
@@ -574,12 +714,16 @@ app.registerExtension({
             ].join("\n");
 
             const alignmentGroup = makeControlGroup("Alignment", "alignment");
-            addNumericControl(
+            const downbeatOffset = addNumericControl(
                 alignmentGroup.body,
                 "downbeat_offset",
-                "Downbeat offset",
-                { step: 0.001 },
+                "Downbeat offset (s)",
+                { decimal: true, step: 0.001 },
             );
+            downbeatOffset.title = [
+                "Time in seconds where Bar 1 \u00b7 Beat 1 occurs.",
+                "Positive values move the first downbeat later; negative values place it before audio time 0.",
+            ].join("\n");
             controlGroups.append(timingGroup.group, meterGridGroup.group, alignmentGroup.group);
             musicalPanel.appendChild(controlGroups);
 
@@ -788,6 +932,14 @@ app.registerExtension({
                 let audioDuration = 0;
                 let dragging = null;
                 let lastRulerKey = "";
+                let metronomeScheduler = null;
+                let metronomeOutputBus = null;
+                let metronomeNextBeatIndex = null;
+                let metronomeRunSignature = "";
+                let metronomeLastMediaTime = null;
+                let metronomeLastContextTime = null;
+                let metronomeGeneration = 0;
+                const metronomeClickResources = new Set();
 
                 for (const name of HIDDEN_WIDGETS) hideWidget(widgets.get(name));
 
@@ -935,8 +1087,304 @@ app.registerExtension({
                     };
                 };
 
+                const metronomeRunState = () => {
+                    const playerDuration = audioEl.duration;
+                    if (
+                        node._musicalAudioRemoved
+                        || !metronomeEnabled(node)
+                        || currentMode() !== "Musical"
+                        || audioEl.paused
+                        || audioEl.ended
+                        || !(Number.isFinite(audioDuration) && audioDuration > 0)
+                        || !(Number.isFinite(playerDuration) && playerDuration > 0)
+                    ) {
+                        return null;
+                    }
+                    const playbackRate = audioEl.playbackRate;
+                    if (!(Number.isFinite(playbackRate) && playbackRate > 0)) return null;
+                    const selection = resolveSelection();
+                    if (!(selection.end > selection.start)) return null;
+                    return { selection, playbackRate, duration: playerDuration };
+                };
+
+                const metronomeSignature = (runState) => [
+                    runState.selection.timing.secondsPerBeat,
+                    runState.selection.timing.beatsPerBar,
+                    runState.selection.timing.downbeatOffset,
+                    runState.selection.start,
+                    runState.selection.end,
+                    runState.duration,
+                    runState.playbackRate,
+                    audioEl.currentSrc || audioEl.src,
+                ].join(":");
+
+                const disposeMetronomeClick = (resource, stopNow = false) => {
+                    if (!metronomeClickResources.delete(resource)) return;
+                    resource.oscillator.onended = null;
+                    if (stopNow) {
+                        const contextNow = resource.oscillator.context.currentTime;
+                        try {
+                            resource.gain.gain.cancelScheduledValues(contextNow);
+                            resource.gain.gain.setValueAtTime(0, contextNow);
+                        } catch {
+                            // The node may already have ended during cleanup.
+                        }
+                        try {
+                            resource.oscillator.stop(contextNow);
+                        } catch {
+                            // OscillatorNode.stop() throws when it has already stopped.
+                        }
+                    }
+                    try {
+                        resource.oscillator.disconnect();
+                    } catch {
+                        // Already disconnected.
+                    }
+                    try {
+                        resource.gain.disconnect();
+                    } catch {
+                        // Already disconnected.
+                    }
+                };
+
+                const cancelPendingMetronomeClicks = () => {
+                    for (const resource of [...metronomeClickResources]) {
+                        disposeMetronomeClick(resource, true);
+                    }
+                };
+
+                const updateMetronomeOutputBusGain = (gainMultiplier) => {
+                    if (!metronomeOutputBus) return;
+                    const gainParam = metronomeOutputBus.gain;
+                    const contextNow = metronomeOutputBus.context.currentTime;
+                    let heldCurrentValue = false;
+                    if (typeof gainParam.cancelAndHoldAtTime === "function") {
+                        try {
+                            gainParam.cancelAndHoldAtTime(contextNow);
+                            heldCurrentValue = true;
+                        } catch {
+                            // Older Web Audio implementations use the fallback below.
+                        }
+                    }
+                    if (!heldCurrentValue) {
+                        const currentValue = gainParam.value;
+                        gainParam.cancelScheduledValues(contextNow);
+                        gainParam.setValueAtTime(currentValue, contextNow);
+                    }
+                    gainParam.linearRampToValueAtTime(
+                        gainMultiplier,
+                        contextNow + METRONOME_VOLUME_RAMP_SECONDS,
+                    );
+                };
+
+                const stopMusicalAudioMetronome = () => {
+                    metronomeGeneration += 1;
+                    if (metronomeScheduler !== null) {
+                        clearInterval(metronomeScheduler);
+                        metronomeScheduler = null;
+                    }
+                    cancelPendingMetronomeClicks();
+                    metronomeNextBeatIndex = null;
+                    metronomeRunSignature = "";
+                    metronomeLastMediaTime = null;
+                    metronomeLastContextTime = null;
+                };
+
+                const ensureMetronomeOutputBus = (context) => {
+                    if (metronomeOutputBus?.context === context) return metronomeOutputBus;
+                    if (metronomeOutputBus) {
+                        try {
+                            metronomeOutputBus.disconnect();
+                        } catch {
+                            // Already disconnected.
+                        }
+                    }
+                    metronomeOutputBus = context.createGain();
+                    metronomeOutputBus.gain.value = currentMetronomeVolumeGain();
+                    metronomeOutputBus.connect(context.destination);
+                    metronomeVolumeTargets.add(updateMetronomeOutputBusGain);
+                    return metronomeOutputBus;
+                };
+
+                const scheduleMetronomeClick = (context, contextTime, downbeat) => {
+                    const outputBus = ensureMetronomeOutputBus(context);
+                    const oscillator = context.createOscillator();
+                    const gain = context.createGain();
+                    const frequency = downbeat ? 1500 : 1000;
+                    const peakGain = downbeat ? 0.13 : 0.07;
+                    const duration = downbeat ? 0.045 : 0.035;
+                    const startTime = Math.max(
+                        context.currentTime + METRONOME_START_LEAD_SECONDS,
+                        contextTime,
+                    );
+                    const attackEnd = startTime + 0.002;
+                    const soundEnd = startTime + duration;
+
+                    oscillator.frequency.setValueAtTime(frequency, startTime);
+                    gain.gain.setValueAtTime(0.0001, startTime);
+                    gain.gain.linearRampToValueAtTime(peakGain, attackEnd);
+                    gain.gain.exponentialRampToValueAtTime(0.0001, soundEnd);
+                    oscillator.connect(gain);
+                    gain.connect(outputBus);
+
+                    const resource = { oscillator, gain };
+                    metronomeClickResources.add(resource);
+                    oscillator.onended = () => disposeMetronomeClick(resource);
+                    oscillator.start(startTime);
+                    oscillator.stop(soundEnd + 0.005);
+                };
+
+                const resetMetronomeBeatPosition = (runState) => {
+                    const firstMediaTime = Math.max(
+                        audioEl.currentTime,
+                        runState.selection.start,
+                        0,
+                    );
+                    metronomeNextBeatIndex = metronomeBeatIndexAtOrAfter(
+                        firstMediaTime,
+                        runState.selection.timing,
+                    );
+                    metronomeLastMediaTime = null;
+                    metronomeLastContextTime = null;
+                };
+
+                let reconcileMusicalAudioMetronome;
+
+                const scheduleMetronomeWindow = (generation) => {
+                    if (generation !== metronomeGeneration || node._musicalAudioRemoved) return;
+                    const context = sharedMetronomeAudioContext;
+                    const runState = metronomeRunState();
+                    if (!context || context.state !== "running" || !runState) {
+                        stopMusicalAudioMetronome();
+                        return;
+                    }
+
+                    const currentSignature = metronomeSignature(runState);
+                    if (currentSignature !== metronomeRunSignature) {
+                        void reconcileMusicalAudioMetronome();
+                        return;
+                    }
+
+                    const contextNow = context.currentTime;
+                    const mediaNow = audioEl.currentTime;
+                    if (!Number.isFinite(mediaNow)) {
+                        stopMusicalAudioMetronome();
+                        return;
+                    }
+
+                    if (
+                        metronomeLastMediaTime !== null
+                        && metronomeLastContextTime !== null
+                    ) {
+                        const expectedMediaTime = metronomeLastMediaTime
+                            + (contextNow - metronomeLastContextTime) * runState.playbackRate;
+                        if (
+                            Math.abs(mediaNow - expectedMediaTime)
+                            > METRONOME_JUMP_TOLERANCE_SECONDS
+                        ) {
+                            cancelPendingMetronomeClicks();
+                            resetMetronomeBeatPosition(runState);
+                        }
+                    }
+
+                    const timing = runState.selection.timing;
+                    const scheduleThroughMediaTime = Math.min(
+                        runState.selection.end,
+                        runState.duration,
+                        mediaNow
+                            + METRONOME_SCHEDULE_AHEAD_SECONDS * runState.playbackRate,
+                    );
+                    let safetyCount = 0;
+                    while (metronomeNextBeatIndex !== null && safetyCount < 256) {
+                        const beatIndex = metronomeNextBeatIndex;
+                        const beatTime = metronomeBeatTime(beatIndex, timing);
+                        if (
+                            beatTime < runState.selection.start - BEAT_BOUNDARY_EPSILON
+                            || beatTime < 0 - BEAT_BOUNDARY_EPSILON
+                            || beatTime < mediaNow - BEAT_BOUNDARY_EPSILON
+                        ) {
+                            metronomeNextBeatIndex += 1;
+                            safetyCount += 1;
+                            continue;
+                        }
+                        if (
+                            beatTime >= runState.selection.end - BEAT_BOUNDARY_EPSILON
+                            || beatTime >= runState.duration - BEAT_BOUNDARY_EPSILON
+                            || beatTime > scheduleThroughMediaTime + BEAT_BOUNDARY_EPSILON
+                        ) {
+                            break;
+                        }
+
+                        const contextTime = contextNow
+                            + (beatTime - mediaNow) / runState.playbackRate;
+                        scheduleMetronomeClick(
+                            context,
+                            contextTime,
+                            isMetronomeDownbeat(beatIndex, timing.beatsPerBar),
+                        );
+                        metronomeNextBeatIndex += 1;
+                        safetyCount += 1;
+                    }
+
+                    metronomeLastMediaTime = mediaNow;
+                    metronomeLastContextTime = contextNow;
+                };
+
+                reconcileMusicalAudioMetronome = async ({
+                    allowContextCreation = false,
+                    ensureContextWhilePaused = false,
+                } = {}) => {
+                    stopMusicalAudioMetronome();
+                    const initialRunState = metronomeRunState();
+                    if (!initialRunState && !ensureContextWhilePaused) return;
+
+                    const generation = metronomeGeneration;
+                    const context = await ensureSharedMetronomeContext(allowContextCreation);
+                    if (
+                        generation !== metronomeGeneration
+                        || node._musicalAudioRemoved
+                        || !context
+                    ) {
+                        return;
+                    }
+
+                    const runState = metronomeRunState();
+                    if (!runState) return;
+                    ensureMetronomeOutputBus(context);
+                    metronomeRunSignature = metronomeSignature(runState);
+                    resetMetronomeBeatPosition(runState);
+                    scheduleMetronomeWindow(generation);
+                    if (generation !== metronomeGeneration || metronomeScheduler !== null) return;
+                    metronomeScheduler = setInterval(
+                        () => scheduleMetronomeWindow(generation),
+                        METRONOME_SCHEDULER_INTERVAL_MS,
+                    );
+                };
+
+                node.stopMusicalAudioMetronome = stopMusicalAudioMetronome;
+                node.destroyMusicalAudioMetronome = () => {
+                    stopMusicalAudioMetronome();
+                    metronomeVolumeTargets.delete(updateMetronomeOutputBusGain);
+                    if (metronomeOutputBus) {
+                        try {
+                            metronomeOutputBus.disconnect();
+                        } catch {
+                            // Already disconnected.
+                        }
+                        metronomeOutputBus = null;
+                    }
+                };
+
                 const setControlValue = (control, value, force = false) => {
-                    if (!control || (!force && document.activeElement === control)) return;
+                    if (
+                        !control
+                        || (
+                            document.activeElement === control
+                            && (control.type === "text" || !force)
+                        )
+                    ) {
+                        return;
+                    }
                     const next = typeof value === "number" ? formatInputValue(value) : String(value);
                     if (control.value !== next) control.value = next;
                 };
@@ -948,6 +1396,7 @@ app.registerExtension({
                         button.setAttribute("aria-pressed", active ? "true" : "false");
                     }
                     syncInput.checked = syncOnSwitchEnabled(node);
+                    metronomeInput.checked = metronomeEnabled(node);
                     setControlValue(snapSelect, storedSnapMode(), force);
                     container.dataset.mode = state.mode.toLowerCase();
                     frameFallbackNote.classList.toggle(
@@ -1164,6 +1613,7 @@ app.registerExtension({
 
                 const updateAudioSource = () => {
                     if (!audioWidget?.value || audioWidget.value === "none") {
+                        stopMusicalAudioMetronome();
                         playerTitle.textContent = "No audio selected";
                         audioDuration = 0;
                         audioEl.removeAttribute("src");
@@ -1184,7 +1634,10 @@ app.registerExtension({
                     const source = api.apiURL(
                         `/view?filename=${encodeURIComponent(filename)}&type=input&subfolder=${encodeURIComponent(subfolder)}`,
                     );
-                    if (audioEl.src !== source) audioEl.src = source;
+                    if (audioEl.src !== source) {
+                        stopMusicalAudioMetronome();
+                        audioEl.src = source;
+                    }
                 };
 
                 const writeSecondsRange = (start, storedEnd, resolvedEnd) => {
@@ -1241,15 +1694,83 @@ app.registerExtension({
                     writeMusicalSelection(startIndex, count);
                 };
 
-                const activeChangeComplete = (seek = true, recomputeLayout = false) => {
+                const activeChangeComplete = (
+                    seek = true,
+                    recomputeLayout = false,
+                    resyncMetronome = true,
+                ) => {
+                    if (resyncMetronome) stopMusicalAudioMetronome();
                     lastRulerKey = "";
                     refreshUI(seek, true, recomputeLayout);
                     dirtyGraph(false);
+                    if (resyncMetronome) {
+                        void reconcileMusicalAudioMetronome({ allowContextCreation: true });
+                    }
+                };
+
+                const writeAndDetectWidgetChanges = (names, write) => {
+                    const before = names.map((name) => widgetValue(name, undefined));
+                    if (write() === false) return false;
+                    return names.some((name, index) => {
+                        const current = widgetValue(name, undefined);
+                        return !Object.is(current, before[index]) && current !== before[index];
+                    });
+                };
+
+                const setCanonicalDecimalControlValue = (control, value) => {
+                    const next = typeof value === "number"
+                        ? formatInputValue(value)
+                        : String(value);
+                    if (control.value !== next) control.value = next;
+                };
+
+                const bindDecimalControl = (control, {
+                    isAllowed = () => true,
+                    write,
+                    displayValue,
+                }) => {
+                    const commit = () => {
+                        if (isIntermediateDecimalText(control.value)) {
+                            return { committed: false, changed: false };
+                        }
+                        const parsed = parseLocalizedDecimal(control.value);
+                        if (parsed === null || !isAllowed(parsed)) {
+                            return { committed: false, changed: false };
+                        }
+                        const stored = storedNumber(parsed);
+                        if (stored === null || !isAllowed(stored)) {
+                            return { committed: false, changed: false };
+                        }
+                        return { committed: true, changed: write(stored) };
+                    };
+
+                    const commitAndRefresh = () => {
+                        const result = commit();
+                        if (result.changed) activeChangeComplete(true);
+                        return result;
+                    };
+
+                    control.addEventListener("input", commitAndRefresh);
+                    control.addEventListener("blur", () => {
+                        commitAndRefresh();
+                        setCanonicalDecimalControlValue(control, displayValue());
+                    });
+                    control.addEventListener("keydown", (event) => {
+                        if (event.key !== "Enter") return;
+                        event.preventDefault();
+                        const result = commitAndRefresh();
+                        if (result.committed) {
+                            control.blur();
+                        } else {
+                            setCanonicalDecimalControlValue(control, displayValue());
+                        }
+                    });
                 };
 
                 const switchEditMode = (targetMode) => {
                     const sourceMode = currentMode();
                     if (targetMode === sourceMode || node._syncingMusicalAudioMode) return;
+                    if (targetMode === "Seconds") stopMusicalAudioMetronome();
 
                     node._syncingMusicalAudioMode = true;
                     try {
@@ -1300,6 +1821,9 @@ app.registerExtension({
                         refreshUI(true, true, true);
                         dirtyGraph(false);
                         if (feedbackMessage) showSyncFeedback(feedbackMessage);
+                        void reconcileMusicalAudioMetronome({
+                            allowContextCreation: true,
+                        });
                     } finally {
                         node._syncingMusicalAudioMode = false;
                     }
@@ -1317,57 +1841,86 @@ app.registerExtension({
                     if (!syncInput.checked) node.clearMusicalAudioSyncFeedback();
                     dirtyGraph(false);
                 });
+                metronomeInput.addEventListener("change", () => {
+                    metronomeEnabled(node);
+                    if (
+                        node.properties.musical_audio_metronome_enabled
+                        === metronomeInput.checked
+                    ) {
+                        return;
+                    }
+                    node.properties.musical_audio_metronome_enabled = metronomeInput.checked;
+                    if (metronomeInput.checked) {
+                        void reconcileMusicalAudioMetronome({
+                            allowContextCreation: true,
+                            ensureContextWhilePaused: true,
+                        });
+                    } else {
+                        stopMusicalAudioMetronome();
+                    }
+                    dirtyGraph(false);
+                });
                 snapSelect.addEventListener("change", () => {
                     if (!SNAP_MODES.includes(snapSelect.value)) return;
                     setWidgetValue("snap_mode", snapSelect.value);
-                    activeChangeComplete(false, visibleStructureChanged());
+                    activeChangeComplete(false, visibleStructureChanged(), false);
                 });
 
-                secondsStartInput.addEventListener("input", () => {
-                    const parsed = Number.parseFloat(secondsStartInput.value);
-                    if (!Number.isFinite(parsed)) return;
-                    const state = resolveSelection();
-                    const maximum = audioDuration > 0 ? audioDuration : Math.max(0, parsed);
-                    const resolvedEnd = audioDuration > 0
-                        ? state.end
-                        : Math.max(parsed, finiteNumber(widgetValue("end_time", 0), 0));
-                    const start = clamp(parsed, 0, Math.max(0, Math.min(maximum, resolvedEnd)));
-                    const endStored = finiteNumber(widgetValue("end_time", 0), 0) <= 0
-                        ? 0
-                        : resolvedEnd;
-                    writeSecondsRange(start, endStored, resolvedEnd);
-                    activeChangeComplete(true);
+                const secondsWidgetNames = ["start_time", "end_time", "duration"];
+
+                bindDecimalControl(secondsStartInput, {
+                    isAllowed: (value) => value >= 0,
+                    write: (value) => writeAndDetectWidgetChanges(secondsWidgetNames, () => {
+                        const state = resolveSelection();
+                        const maximum = audioDuration > 0 ? audioDuration : value;
+                        const resolvedEnd = audioDuration > 0
+                            ? state.end
+                            : Math.max(value, finiteNumber(widgetValue("end_time", 0), 0));
+                        const start = clamp(
+                            value,
+                            0,
+                            Math.max(0, Math.min(maximum, resolvedEnd)),
+                        );
+                        const endStored = finiteNumber(widgetValue("end_time", 0), 0) <= 0
+                            ? 0
+                            : resolvedEnd;
+                        return writeSecondsRange(start, endStored, resolvedEnd);
+                    }),
+                    displayValue: () => finiteNumber(widgetValue("start_time", 0), 0),
                 });
 
-                secondsEndInput.addEventListener("input", () => {
-                    const parsed = Number.parseFloat(secondsEndInput.value);
-                    if (!Number.isFinite(parsed)) return;
-                    const state = resolveSelection();
-                    const start = state.start;
-                    if (parsed <= 0) {
-                        const resolvedEnd = audioDuration > 0 ? audioDuration : start;
-                        writeSecondsRange(start, 0, resolvedEnd);
-                    } else {
-                        const maximum = audioDuration > 0 ? audioDuration : parsed;
-                        const resolvedEnd = clamp(parsed, start, Math.max(start, maximum));
-                        writeSecondsRange(start, resolvedEnd, resolvedEnd);
-                    }
-                    activeChangeComplete(true);
+                bindDecimalControl(secondsEndInput, {
+                    isAllowed: (value) => value >= 0,
+                    write: (value) => writeAndDetectWidgetChanges(secondsWidgetNames, () => {
+                        const state = resolveSelection();
+                        const start = state.start;
+                        if (value <= 0) {
+                            const resolvedEnd = audioDuration > 0 ? audioDuration : start;
+                            return writeSecondsRange(start, 0, resolvedEnd);
+                        }
+                        const maximum = audioDuration > 0 ? audioDuration : value;
+                        const resolvedEnd = clamp(value, start, Math.max(start, maximum));
+                        return writeSecondsRange(start, resolvedEnd, resolvedEnd);
+                    }),
+                    displayValue: () => finiteNumber(widgetValue("end_time", 0), 0),
                 });
 
-                secondsDurationInput.addEventListener("input", () => {
-                    const parsed = Number.parseFloat(secondsDurationInput.value);
-                    if (!Number.isFinite(parsed)) return;
-                    let length = Math.max(0, parsed);
-                    let start = Math.max(0, finiteNumber(widgetValue("start_time", 0), 0));
-                    if (audioDuration > 0) {
-                        length = Math.min(length, audioDuration);
-                        start = Math.min(start, audioDuration);
-                        if (start + length > audioDuration) start = audioDuration - length;
-                    }
-                    const end = start + length;
-                    writeSecondsRange(start, end, end);
-                    activeChangeComplete(true);
+                bindDecimalControl(secondsDurationInput, {
+                    isAllowed: (value) => value >= 0,
+                    write: (value) => writeAndDetectWidgetChanges(secondsWidgetNames, () => {
+                        let length = value;
+                        let start = Math.max(0, finiteNumber(widgetValue("start_time", 0), 0));
+                        if (audioDuration > 0) {
+                            length = Math.min(length, audioDuration);
+                            start = Math.min(start, audioDuration);
+                            if (start + length > audioDuration) start = audioDuration - length;
+                        }
+                        const end = start + length;
+                        return writeSecondsRange(start, end, end);
+                    }),
+                    displayValue: () => currentMode() === "Seconds"
+                        ? resolveSelection().selectionDuration
+                        : finiteNumber(widgetValue("duration", 0), 0),
                 });
 
                 const integerWidgetNames = new Set([
@@ -1398,8 +1951,20 @@ app.registerExtension({
                     "duration_subdivisions",
                     "subdivisions_per_beat",
                 ]);
+                const decimalTimingWidgetNames = new Set(["bpm", "fps", "downbeat_offset"]);
 
                 for (const [name, control] of controlByWidget) {
+                    if (decimalTimingWidgetNames.has(name)) {
+                        bindDecimalControl(control, {
+                            isAllowed: (value) => name === "downbeat_offset" || value > 0,
+                            write: (value) => writeAndDetectWidgetChanges(
+                                [name],
+                                () => setWidgetValue(name, value),
+                            ),
+                            displayValue: () => finiteNumber(widgetValue(name, 0), 0),
+                        });
+                        continue;
+                    }
                     const eventName = control.tagName === "SELECT" ? "change" : "input";
                     control.addEventListener(eventName, () => {
                         if (control.tagName === "SELECT") {
@@ -1554,15 +2119,18 @@ app.registerExtension({
                     }
                     refreshUI(false, true, true);
                     dirtyGraph(false);
+                    if (!audioEl.paused) void reconcileMusicalAudioMetronome();
                 });
                 audioEl.addEventListener("durationchange", () => {
                     if (Number.isFinite(audioEl.duration) && audioEl.duration >= 0) {
                         audioDuration = audioEl.duration;
                         lastRulerKey = "";
                         refreshUI(false, false);
+                        if (!audioEl.paused) void reconcileMusicalAudioMetronome();
                     }
                 });
                 audioEl.addEventListener("error", () => {
+                    stopMusicalAudioMetronome();
                     audioDuration = 0;
                     lastRulerKey = "";
                     refreshUI(false, false);
@@ -1582,6 +2150,19 @@ app.registerExtension({
                         seekToSelectionStart(state);
                     } else if (audioEl.currentTime < state.start || audioEl.currentTime >= state.end) {
                         audioEl.currentTime = state.start;
+                    }
+                    void reconcileMusicalAudioMetronome({ allowContextCreation: true });
+                });
+                audioEl.addEventListener("pause", stopMusicalAudioMetronome);
+                audioEl.addEventListener("ended", stopMusicalAudioMetronome);
+                audioEl.addEventListener("emptied", stopMusicalAudioMetronome);
+                audioEl.addEventListener("seeking", stopMusicalAudioMetronome);
+                audioEl.addEventListener("seeked", () => {
+                    if (!audioEl.paused) void reconcileMusicalAudioMetronome();
+                });
+                audioEl.addEventListener("ratechange", () => {
+                    if (!audioEl.paused) {
+                        void reconcileMusicalAudioMetronome({ allowContextCreation: true });
                     }
                 });
 
@@ -1626,6 +2207,7 @@ app.registerExtension({
                     widget.callback = function () {
                         const callbackResult = original ? original.apply(this, arguments) : undefined;
                         if (!internalUpdate) {
+                            stopMusicalAudioMetronome();
                             const activeNativeChange = (
                                 !node._initializingMusicalAudio
                                 && !node._configuringMusicalAudio
@@ -1658,6 +2240,7 @@ app.registerExtension({
                                 lastRulerKey = "";
                                 refreshUI(true, false, visibleStructureChanged());
                                 dirtyGraph(false);
+                                if (!audioEl.paused) void reconcileMusicalAudioMetronome();
                             }, 0);
                         }
                         return callbackResult;
@@ -1668,6 +2251,7 @@ app.registerExtension({
                     updateAudioSource();
                     lastRulerKey = "";
                     refreshUI(false, true, recomputeLayout);
+                    if (!audioEl.paused) void reconcileMusicalAudioMetronome();
                 };
                 node.refreshMusicalAudioTimeline = () => {
                     lastRulerKey = "";

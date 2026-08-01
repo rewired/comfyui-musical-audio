@@ -201,6 +201,28 @@ class LoadAudioOutputContractTests(unittest.TestCase):
                     if external_name != missing_external_name:
                         self.assertEqual(planning_inputs[planner_name], external_value)
 
+    def test_negative_downbeat_offsets_reach_the_planner_without_clamping(self) -> None:
+        cases = (
+            ("local fractional", {"downbeat_offset": -0.125}, -0.125),
+            ("local extended", {"downbeat_offset": -1.25}, -1.25),
+            (
+                "external override",
+                {"downbeat_offset": -1.25, "downbeat_offset_input": -0.5},
+                -0.5,
+            ),
+        )
+
+        for label, overrides, expected in cases:
+            with self.subTest(label=label):
+                planner = Mock(return_value=_plan())
+                module = _load_node_module(planner)
+                _load_audio(module, **overrides)
+
+                self.assertEqual(
+                    planner.call_args.kwargs["downbeat_offset"],
+                    expected,
+                )
+
     def test_invalid_external_values_reach_normal_timing_validation(self) -> None:
         invalid_values = {
             "bpm_input": 0,
