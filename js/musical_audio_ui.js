@@ -42,6 +42,8 @@ const TEMPO_UNITS = ["Quarter", "Eighth", "Dotted Quarter"];
 const SNAP_MODES = ["Off", "Bar", "Beat", "Subdivision", "Video Frame"];
 const STORAGE_PRECISION = 1_000_000;
 const STYLESHEET_ID = "comfyui-musical-audio-styles";
+const RESIZE_HEIGHT_SYNC_DELAY_MS = 120;
+const WIDTH_CHANGE_TOLERANCE_PX = 1;
 
 function ensureStylesheet() {
     if (document.getElementById(STYLESHEET_ID)) return;
@@ -128,6 +130,21 @@ function makeField(labelText, control) {
     return field;
 }
 
+function makeControlGroup(title, modifier) {
+    const group = makeElement(
+        "fieldset",
+        `musical-audio-ui__control-group musical-audio-ui__control-group--${modifier}`,
+    );
+    const legend = makeElement(
+        "legend",
+        "musical-audio-ui__control-group-title",
+        title,
+    );
+    const body = makeElement("div", "musical-audio-ui__control-group-body");
+    group.append(legend, body);
+    return { group, body };
+}
+
 function formatInputValue(value) {
     if (!Number.isFinite(value)) return "0";
     const stored = storedNumber(value);
@@ -155,6 +172,7 @@ app.registerExtension({
         const onDrawBackground = nodeType.prototype.onDrawBackground;
         const onConfigure = nodeType.prototype.onConfigure;
         const onResize = nodeType.prototype.onResize;
+        const onRemoved = nodeType.prototype.onRemoved;
 
         nodeType.prototype.onDrawBackground = function () {
             if (onDrawBackground) onDrawBackground.apply(this, arguments);
@@ -162,15 +180,29 @@ app.registerExtension({
 
         nodeType.prototype.onResize = function () {
             const result = onResize ? onResize.apply(this, arguments) : undefined;
-            // Legacy DOM widgets re-enter onResize after setSize, so resize only follows width.
-            if (this.syncMusicalAudioWidth) this.syncMusicalAudioWidth();
+            // Width follows the drag immediately; responsive height follows once resizing settles.
+            const widthChanged = this.syncMusicalAudioWidth
+                ? this.syncMusicalAudioWidth()
+                : false;
+            if (widthChanged && this.scheduleMusicalAudioResizeHeightSync) {
+                this.scheduleMusicalAudioResizeHeightSync();
+            }
             return result;
+        };
+
+        nodeType.prototype.onRemoved = function () {
+            this._musicalAudioRemoved = true;
+            if (this.cancelMusicalAudioResizeHeightSync) {
+                this.cancelMusicalAudioResizeHeightSync();
+            }
+            return onRemoved ? onRemoved.apply(this, arguments) : undefined;
         };
 
         nodeType.prototype.onConfigure = function () {
             this._configuringMusicalAudio = true;
             const result = onConfigure ? onConfigure.apply(this, arguments) : undefined;
             setTimeout(() => {
+                if (this._musicalAudioRemoved) return;
                 this._configuringMusicalAudio = false;
                 if (this.syncMusicalAudioWidth) this.syncMusicalAudioWidth();
                 if (this.refreshMusicalAudioUI) {
@@ -185,6 +217,7 @@ app.registerExtension({
             const node = this;
             node._initializingMusicalAudio = true;
             node._shouldResetSecondsTrim = false;
+            node._musicalAudioRemoved = false;
 
             // Prevent ComfyUI V1/V2 image-preview paths from replacing the audio UI.
             Object.defineProperty(node, "imgs", {
@@ -302,12 +335,12 @@ app.registerExtension({
             );
             container.appendChild(secondsPanel);
 
-            // 4b. Musical grid and selection controls.
+            // 4b. Musical timing groups and selection controls.
             const musicalPanel = makeElement(
                 "div",
                 "musical-audio-ui__panel musical-audio-ui__panel--musical",
             );
-            const gridControls = makeElement("div", "musical-audio-ui__grid-controls");
+            const controlGroups = makeElement("div", "musical-audio-ui__control-groups");
             const controlByWidget = new Map();
 
             const addNumericControl = (parent, widgetName, label, options = {}) => {
@@ -325,14 +358,61 @@ app.registerExtension({
                 return select;
             };
 
-            addNumericControl(gridControls, "bpm", "BPM", { min: 0.000001, step: 0.01 });
-            addSelectControl(gridControls, "tempo_unit", "Tempo unit", TEMPO_UNITS);
-            addNumericControl(gridControls, "beats_per_bar", "Meter numerator", { min: 1 });
-            addNumericControl(gridControls, "beat_unit", "Meter denominator", { min: 1 });
-            addNumericControl(gridControls, "downbeat_offset", "Downbeat offset", { step: 0.001 });
-            addNumericControl(gridControls, "fps", "FPS", { min: 0.000001, step: 0.001 });
-            addNumericControl(gridControls, "subdivisions_per_beat", "Subdivisions / beat", { min: 1 });
-            musicalPanel.appendChild(gridControls);
+            const timingGroup = makeControlGroup("Timing", "timing");
+            addNumericControl(timingGroup.body, "bpm", "BPM", { min: 0.000001, step: 0.01 });
+            addSelectControl(timingGroup.body, "tempo_unit", "Tempo unit", TEMPO_UNITS);
+            addNumericControl(timingGroup.body, "fps", "FPS", { min: 0.000001, step: 0.001 });
+
+            const meterGridGroup = makeControlGroup("Meter & Grid", "meter-grid");
+            const meterField = makeElement(
+                "div",
+                "musical-audio-ui__field musical-audio-ui__meter-field",
+            );
+            meterField.appendChild(makeElement(
+                "span",
+                "musical-audio-ui__field-label",
+                "Time signature",
+            ));
+            const meterControl = makeElement("div", "musical-audio-ui__meter");
+            const meterNumerator = compactInput();
+            meterNumerator.min = "1";
+            meterNumerator.step = "1";
+            meterNumerator.classList.add("musical-audio-ui__meter-numerator");
+            meterNumerator.setAttribute("aria-label", "Meter numerator");
+            meterNumerator.title = "Meter numerator (beats per bar)";
+            const meterDivider = makeElement("div", "musical-audio-ui__meter-divider");
+            meterDivider.setAttribute("aria-hidden", "true");
+            const meterDenominator = compactInput();
+            meterDenominator.min = "1";
+            meterDenominator.step = "1";
+            meterDenominator.classList.add("musical-audio-ui__meter-denominator");
+            meterDenominator.setAttribute("aria-label", "Meter denominator");
+            meterDenominator.title = "Meter denominator (beat unit)";
+            controlByWidget.set("beats_per_bar", meterNumerator);
+            controlByWidget.set("beat_unit", meterDenominator);
+            meterControl.append(meterNumerator, meterDivider, meterDenominator);
+            meterField.appendChild(meterControl);
+            meterGridGroup.body.appendChild(meterField);
+            const gridDivisions = addNumericControl(
+                meterGridGroup.body,
+                "subdivisions_per_beat",
+                "Grid divisions / beat",
+                { min: 1 },
+            );
+            gridDivisions.title = [
+                "Number of equal grid steps inside each beat.",
+                "In 4/4, a value of 4 creates a sixteenth-note grid.",
+            ].join("\n");
+
+            const alignmentGroup = makeControlGroup("Alignment", "alignment");
+            addNumericControl(
+                alignmentGroup.body,
+                "downbeat_offset",
+                "Downbeat offset",
+                { step: 0.001 },
+            );
+            controlGroups.append(timingGroup.group, meterGridGroup.group, alignmentGroup.group);
+            musicalPanel.appendChild(controlGroups);
 
             const selectionHeading = makeElement(
                 "div",
@@ -361,10 +441,18 @@ app.registerExtension({
             musicalPanel.appendChild(frameFallbackNote);
             container.appendChild(musicalPanel);
 
-            // 5 and 6. Ruler and selection timeline.
+            // 5 and 6. Ruler and selection timeline in one shared horizontal viewport.
             const trimArea = makeElement("div", "musical-audio-ui__trim-area");
+            const timelineViewport = makeElement(
+                "div",
+                "musical-audio-ui__timeline-viewport",
+            );
+            const timelineContent = makeElement(
+                "div",
+                "musical-audio-ui__timeline-content",
+            );
             const timeRuler = makeElement("div", "musical-audio-ui__ruler");
-            trimArea.appendChild(timeRuler);
+            timelineContent.appendChild(timeRuler);
 
             const sliderBox = makeElement("div", "musical-audio-ui__timeline");
             const fill = makeElement("div", "musical-audio-ui__selection");
@@ -379,7 +467,9 @@ app.registerExtension({
                 "musical-audio-ui__handle musical-audio-ui__handle--end",
             );
             sliderBox.append(startHandle, endHandle);
-            trimArea.appendChild(sliderBox);
+            timelineContent.appendChild(sliderBox);
+            timelineViewport.appendChild(timelineContent);
+            trimArea.appendChild(timelineViewport);
             container.appendChild(trimArea);
 
             // 7. Compact position/status line.
@@ -399,17 +489,49 @@ app.registerExtension({
 
             let heightSyncQueued = false;
             let heightSyncUpdating = false;
+            let resizeHeightSyncTimer = null;
+            let lastObservedNodeWidth = Number.isFinite(node.size?.[0])
+                ? node.size[0]
+                : 475;
             node.syncMusicalAudioWidth = function () {
-                const nodeWidth = this.size?.[0] ?? 475;
+                const rawNodeWidth = this.size?.[0];
+                const nodeWidth = Number.isFinite(rawNodeWidth) ? rawNodeWidth : 475;
                 const targetWidth = Math.max(10, nodeWidth - 30);
+                const renderedWidthChanged = container.style.width !== `${targetWidth}px`;
+                const meaningfulWidthChange = Math.abs(
+                    nodeWidth - lastObservedNodeWidth,
+                ) >= WIDTH_CHANGE_TOLERANCE_PX;
                 container.style.width = `${targetWidth}px`;
                 container.style.maxWidth = `${targetWidth}px`;
+                if (renderedWidthChanged && this.refreshMusicalAudioTimeline) {
+                    this.refreshMusicalAudioTimeline();
+                }
+                if (meaningfulWidthChange) lastObservedNodeWidth = nodeWidth;
+                return meaningfulWidthChange;
+            };
+            node.cancelMusicalAudioResizeHeightSync = function () {
+                if (resizeHeightSyncTimer === null) return;
+                clearTimeout(resizeHeightSyncTimer);
+                resizeHeightSyncTimer = null;
+            };
+            node.scheduleMusicalAudioResizeHeightSync = function () {
+                if (this._musicalAudioRemoved) return;
+                this.cancelMusicalAudioResizeHeightSync();
+                resizeHeightSyncTimer = setTimeout(() => {
+                    resizeHeightSyncTimer = null;
+                    if (node._musicalAudioRemoved) return;
+                    node.scheduleMusicalAudioHeightSync();
+                }, RESIZE_HEIGHT_SYNC_DELAY_MS);
             };
             node.scheduleMusicalAudioHeightSync = function () {
+                this.cancelMusicalAudioResizeHeightSync();
+                if (this._musicalAudioRemoved) return;
                 if (heightSyncQueued || heightSyncUpdating) return;
                 heightSyncQueued = true;
                 requestAnimationFrame(() => {
                     heightSyncQueued = false;
+                    if (node._musicalAudioRemoved) return;
+                    node.cancelMusicalAudioResizeHeightSync();
                     if (heightSyncUpdating) return;
 
                     const previousHeight = container.style.height;
@@ -445,6 +567,7 @@ app.registerExtension({
             node.syncMusicalAudioWidth();
 
             setTimeout(() => {
+                if (node._musicalAudioRemoved) return;
                 const widgets = new Map((node.widgets || []).map((candidate) => [candidate.name, candidate]));
                 const audioWidget = widgets.get("audio");
                 const originalCallbacks = new Map();
@@ -683,7 +806,7 @@ app.registerExtension({
                     }
                 };
 
-                const renderMusicalRuler = (timing) => {
+                const renderMusicalRuler = (timing, effectiveWidth) => {
                     if (timing.downbeatOffset > 0) {
                         const mutedWidth = clamp((timing.downbeatOffset / audioDuration) * 100, 0, 100);
                         const preroll = makeElement("div", "musical-audio-ui__preroll");
@@ -707,7 +830,8 @@ app.registerExtension({
                         step = subdivisionsPerBar * Math.ceil(range / subdivisionsPerBar / 100);
                     }
                     const visibleBars = Math.max(1, Math.ceil(range / subdivisionsPerBar));
-                    const labelStride = Math.max(1, Math.ceil(visibleBars / 35));
+                    const maximumLabels = Math.max(1, Math.floor(effectiveWidth / 48));
+                    const labelStride = Math.max(1, Math.ceil(visibleBars / maximumLabels));
                     const firstTick = Math.ceil(firstIndex / step) * step;
 
                     let rendered = 0;
@@ -736,11 +860,13 @@ app.registerExtension({
                 };
 
                 const renderRuler = (state) => {
+                    const effectiveWidth = Math.max(1, timelineContent.clientWidth);
                     const rulerKey = state.mode === "Seconds"
-                        ? `Seconds:${audioDuration}`
+                        ? `Seconds:${audioDuration}:${effectiveWidth}`
                         : [
                             "Musical",
                             audioDuration,
+                            effectiveWidth,
                             state.timing.secondsPerSubdivision,
                             state.timing.beatsPerBar,
                             state.timing.subdivisionsPerBeat,
@@ -750,7 +876,9 @@ app.registerExtension({
                     lastRulerKey = rulerKey;
                     timeRuler.replaceChildren();
                     if (!(audioDuration > 0)) return;
-                    if (state.mode === "Musical") renderMusicalRuler(state.timing);
+                    if (state.mode === "Musical") {
+                        renderMusicalRuler(state.timing, effectiveWidth);
+                    }
                     else renderSecondsRuler();
                 };
 
@@ -1244,6 +1372,12 @@ app.registerExtension({
                     updateAudioSource();
                     lastRulerKey = "";
                     refreshUI(false, true, recomputeLayout);
+                };
+                node.refreshMusicalAudioTimeline = () => {
+                    lastRulerKey = "";
+                    const state = resolveSelection();
+                    renderRuler(state);
+                    renderSelection(state);
                 };
 
                 updateAudioSource();

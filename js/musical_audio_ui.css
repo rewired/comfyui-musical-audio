@@ -18,6 +18,7 @@
     --mau-control-height: 24px;
     --mau-player-height: 40px;
     --mau-timeline-height: 26px;
+    --mau-grid-min-width: 640px;
 
     display: flex;
     flex-direction: column;
@@ -33,6 +34,13 @@
     border-radius: var(--mau-radius);
     font-family: sans-serif;
     transition: background 0.2s;
+}
+
+.musical-audio-ui[data-mode="musical"] {
+    --mau-accent: #f59e0b;
+    --mau-accent-strong: #d97706;
+    --mau-accent-soft: rgba(245, 158, 11, 0.14);
+    --mau-accent-border: rgba(245, 158, 11, 0.45);
 }
 
 .musical-audio-ui.is-dragging {
@@ -178,11 +186,51 @@
     border-radius: 5px;
 }
 
-.musical-audio-ui .musical-audio-ui__grid-controls {
+.musical-audio-ui .musical-audio-ui__control-groups {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(82px, 100%), 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
     gap: var(--mau-gap-small);
     min-width: 0;
+}
+
+.musical-audio-ui .musical-audio-ui__control-group {
+    min-width: 0;
+    margin: 0;
+    padding: 8px;
+    box-sizing: border-box;
+    background: rgba(0, 0, 0, 0.18);
+    border: 1px solid var(--mau-border-subtle);
+    border-radius: var(--mau-radius-small);
+}
+
+.musical-audio-ui .musical-audio-ui__control-group--alignment {
+    grid-column: 1 / -1;
+}
+
+.musical-audio-ui .musical-audio-ui__control-group-title {
+    max-width: 100%;
+    padding: 0 4px;
+    box-sizing: border-box;
+    color: var(--mau-accent);
+    font-size: 9px;
+    font-weight: bold;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+
+.musical-audio-ui .musical-audio-ui__control-group-body {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(112px, 100%), 1fr));
+    gap: var(--mau-gap-small);
+    min-width: 0;
+}
+
+.musical-audio-ui .musical-audio-ui__control-group--timing .musical-audio-ui__control-group-body {
+    grid-template-columns: repeat(auto-fit, minmax(min(88px, 100%), 1fr));
+}
+
+.musical-audio-ui .musical-audio-ui__control-group--alignment .musical-audio-ui__control-group-body {
+    grid-template-columns: minmax(0, 1fr);
 }
 
 .musical-audio-ui .musical-audio-ui__selection-controls {
@@ -193,7 +241,7 @@
 }
 
 .musical-audio-ui .musical-audio-ui__section-heading {
-    color: #7dd3fc;
+    color: var(--mau-accent);
     font-size: 9px;
     font-weight: bold;
     letter-spacing: 0.05em;
@@ -212,6 +260,8 @@
 
 .musical-audio-ui .musical-audio-ui__field-label {
     display: block;
+    max-width: 100%;
+    overflow-wrap: anywhere;
 }
 
 .musical-audio-ui .musical-audio-ui__input,
@@ -234,6 +284,59 @@
     padding-left: 5px;
 }
 
+.musical-audio-ui .musical-audio-ui__input:focus-visible,
+.musical-audio-ui .musical-audio-ui__select:focus-visible {
+    border-color: var(--mau-accent-border);
+    box-shadow: 0 0 0 1px var(--mau-accent-border);
+}
+
+.musical-audio-ui .musical-audio-ui__meter-field {
+    align-items: flex-start;
+}
+
+.musical-audio-ui .musical-audio-ui__meter {
+    display: grid;
+    grid-template-rows: var(--mau-control-height) 1px var(--mau-control-height);
+    width: 100%;
+    min-width: 0;
+    max-width: 88px;
+    padding: 4px 9px;
+    box-sizing: border-box;
+    background: var(--mau-control-bg);
+    border: 1px solid var(--mau-border);
+    border-radius: var(--mau-radius-small);
+}
+
+.musical-audio-ui .musical-audio-ui__meter .musical-audio-ui__input {
+    height: var(--mau-control-height);
+    padding: 0 2px;
+    background: transparent;
+    border-color: transparent;
+    border-radius: 2px;
+    font-size: 16px;
+    font-weight: bold;
+    line-height: var(--mau-control-height);
+    text-align: center;
+    appearance: textfield;
+}
+
+.musical-audio-ui .musical-audio-ui__meter .musical-audio-ui__input::-webkit-inner-spin-button,
+.musical-audio-ui .musical-audio-ui__meter .musical-audio-ui__input::-webkit-outer-spin-button {
+    margin: 0;
+    appearance: none;
+}
+
+.musical-audio-ui .musical-audio-ui__meter .musical-audio-ui__input:focus-visible {
+    background: var(--mau-accent-soft);
+    border-color: var(--mau-accent-border);
+}
+
+.musical-audio-ui .musical-audio-ui__meter-divider {
+    width: 100%;
+    height: 1px;
+    background: var(--mau-accent-border);
+}
+
 .musical-audio-ui .musical-audio-ui__trim-area {
     display: flex;
     flex-direction: column;
@@ -243,6 +346,24 @@
     background: rgba(0, 0, 0, 0.35);
     border: 1px solid rgba(255, 255, 255, 0.05);
     border-radius: var(--mau-radius);
+}
+
+.musical-audio-ui .musical-audio-ui__timeline-viewport {
+    width: 100%;
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    box-sizing: border-box;
+}
+
+.musical-audio-ui .musical-audio-ui__timeline-content {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    width: 100%;
+    min-width: var(--mau-grid-min-width);
+    box-sizing: border-box;
 }
 
 .musical-audio-ui .musical-audio-ui__ruler {
@@ -291,6 +412,10 @@
     background: #d1d5db;
 }
 
+.musical-audio-ui[data-mode="musical"] .musical-audio-ui__tick--bar::before {
+    background: var(--mau-accent-border);
+}
+
 .musical-audio-ui .musical-audio-ui__tick.is-active::before {
     background: var(--mau-accent);
 }
@@ -305,7 +430,7 @@
 }
 
 .musical-audio-ui .musical-audio-ui__tick.is-active .musical-audio-ui__tick-label {
-    color: #7dd3fc;
+    color: var(--mau-accent);
 }
 
 .musical-audio-ui .musical-audio-ui__preroll {
@@ -340,7 +465,8 @@
     left: var(--mau-selection-start);
     width: var(--mau-selection-width);
     height: 100%;
-    background: rgba(14, 165, 233, 0.35);
+    background: var(--mau-accent-soft);
+    box-shadow: inset 0 0 0 1px var(--mau-accent-border);
     pointer-events: none;
 }
 
@@ -362,7 +488,7 @@
 }
 
 .musical-audio-ui .musical-audio-ui__frame-note {
-    color: var(--mau-muted);
+    color: var(--mau-accent);
     font-size: 9px;
     font-style: italic;
 }
