@@ -30,6 +30,12 @@ function requirePositiveInteger(name, value) {
     return value;
 }
 
+function requireNonnegativeInteger(name, value) {
+    requireInteger(name, value);
+    if (value < 0) throw new RangeError(`${name} must be nonnegative`);
+    return value;
+}
+
 /** Round to nearest, resolving exact half ties away from zero. */
 export function roundHalfAwayFromZero(value) {
     requireFinite("value", value);
@@ -205,6 +211,55 @@ export function secondsToNearestSubdivision(seconds, config = {}) {
     return roundHalfAwayFromZero(
         (seconds - grid.downbeatOffset) / grid.secondsPerSubdivision,
     );
+}
+
+/** Quantize a Seconds range to the finest subdivision in the supplied grid. */
+export function secondsRangeToMusicalSelection(
+    { startSeconds = 0, endSeconds = 0 } = {},
+    config = {},
+) {
+    requireFinite("startSeconds", startSeconds);
+    requireFinite("endSeconds", endSeconds);
+    const grid = asGrid(config);
+    let startIndex = Math.max(0, secondsToNearestSubdivision(startSeconds, grid));
+    let endIndex = Math.max(0, secondsToNearestSubdivision(endSeconds, grid));
+    requireNonnegativeInteger("startIndex", startIndex);
+    requireNonnegativeInteger("endIndex", endIndex);
+    endIndex = Math.max(startIndex, endIndex);
+
+    const expandedToOneSubdivision = endSeconds > startSeconds && endIndex === startIndex;
+    if (expandedToOneSubdivision) {
+        endIndex += 1;
+        requireNonnegativeInteger("endIndex", endIndex);
+    }
+
+    return Object.freeze({
+        startIndex,
+        endIndex,
+        subdivisionCount: endIndex - startIndex,
+        quantizedStartSeconds: subdivisionIndexToSeconds(startIndex, grid),
+        quantizedEndSeconds: subdivisionIndexToSeconds(endIndex, grid),
+        expandedToOneSubdivision,
+    });
+}
+
+/** Convert an exact Musical grid start and length to seconds. */
+export function musicalSelectionToSecondsRange(
+    { startIndex = 0, subdivisionCount = 0 } = {},
+    config = {},
+) {
+    requireInteger("startIndex", startIndex);
+    requireNonnegativeInteger("subdivisionCount", subdivisionCount);
+    const endIndex = startIndex + subdivisionCount;
+    requireInteger("endIndex", endIndex);
+    const grid = asGrid(config);
+    const startSeconds = subdivisionIndexToSeconds(startIndex, grid);
+    const endSeconds = subdivisionIndexToSeconds(endIndex, grid);
+    const durationSeconds = Math.max(0, endSeconds - startSeconds);
+    requireFinite("startSeconds", startSeconds);
+    requireFinite("endSeconds", endSeconds);
+    requireFinite("durationSeconds", durationSeconds);
+    return Object.freeze({ startSeconds, endSeconds, durationSeconds });
 }
 
 export function snapToVideoFrame(seconds, fps) {

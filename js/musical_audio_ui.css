@@ -148,6 +148,110 @@
     outline-offset: 1px;
 }
 
+.musical-audio-ui .musical-audio-ui__sync {
+    position: relative;
+    display: flex;
+    align-items: center;
+    flex: 0 1 auto;
+    min-width: 0;
+    gap: 5px;
+    color: var(--mau-muted);
+    font-size: 10px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.musical-audio-ui .musical-audio-ui__sync-label {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.musical-audio-ui .musical-audio-ui__sync-input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: 0;
+    opacity: 0;
+}
+
+.musical-audio-ui .musical-audio-ui__sync-switch {
+    position: relative;
+    display: flex;
+    align-items: center;
+    flex: 0 0 42px;
+    width: 42px;
+    height: 20px;
+    box-sizing: border-box;
+    color: var(--mau-muted);
+    background: var(--mau-control-bg-dark);
+    border: 1px solid var(--mau-border);
+    border-radius: 10px;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.musical-audio-ui .musical-audio-ui__sync-switch::before {
+    position: absolute;
+    right: 5px;
+    font-size: 8px;
+    line-height: 1;
+    content: "Off";
+}
+
+.musical-audio-ui .musical-audio-ui__sync-thumb {
+    position: absolute;
+    left: 2px;
+    width: 14px;
+    height: 14px;
+    background: #737b87;
+    border-radius: 50%;
+    transition: background 0.15s, transform 0.15s;
+}
+
+.musical-audio-ui .musical-audio-ui__sync-input:checked + .musical-audio-ui__sync-switch {
+    color: var(--mau-accent);
+    background: var(--mau-accent-soft);
+    border-color: var(--mau-accent-border);
+}
+
+.musical-audio-ui .musical-audio-ui__sync-input:checked + .musical-audio-ui__sync-switch::before {
+    right: auto;
+    left: 5px;
+    content: "On";
+}
+
+.musical-audio-ui .musical-audio-ui__sync-input:checked + .musical-audio-ui__sync-switch .musical-audio-ui__sync-thumb {
+    background: var(--mau-accent);
+    transform: translateX(22px);
+}
+
+.musical-audio-ui .musical-audio-ui__sync-input:focus-visible + .musical-audio-ui__sync-switch {
+    border-color: var(--mau-accent-border);
+    box-shadow: 0 0 0 2px var(--mau-accent-soft), 0 0 0 1px var(--mau-accent-border);
+}
+
+.musical-audio-ui .musical-audio-ui__sync-feedback {
+    flex: 0 0 12px;
+    min-width: 0;
+    height: 12px;
+    min-height: 12px;
+    max-height: 12px;
+    overflow: hidden;
+    color: var(--mau-accent);
+    font-size: 9px;
+    line-height: 12px;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.15s;
+}
+
+.musical-audio-ui .musical-audio-ui__sync-feedback.is-visible {
+    opacity: 1;
+    visibility: visible;
+}
+
 .musical-audio-ui .musical-audio-ui__snap {
     display: flex;
     align-items: center;

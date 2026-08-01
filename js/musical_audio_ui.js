@@ -3,8 +3,10 @@ import { api } from "../../scripts/api.js";
 import {
     durationFieldsToSubdivisionCount,
     frameToNearestSubdivision,
+    musicalSelectionToSecondsRange,
     musicalPositionToSubdivisionIndex,
     roundHalfAwayFromZero,
+    secondsRangeToMusicalSelection,
     secondsToNearestSubdivision,
     snapToBar,
     snapToBeat,
@@ -43,6 +45,7 @@ const SNAP_MODES = ["Off", "Bar", "Beat", "Subdivision", "Video Frame"];
 const STORAGE_PRECISION = 1_000_000;
 const STYLESHEET_ID = "comfyui-musical-audio-styles";
 const RESIZE_HEIGHT_SYNC_DELAY_MS = 120;
+const SYNC_FEEDBACK_DURATION_MS = 1800;
 const WIDTH_CHANGE_TOLERANCE_PX = 1;
 
 function ensureStylesheet() {
@@ -163,6 +166,16 @@ function durationLabel(fields) {
     return parts.length ? parts.join(" + ") : "0 Beats";
 }
 
+function syncOnSwitchEnabled(node) {
+    if (!node.properties || typeof node.properties !== "object" || Array.isArray(node.properties)) {
+        node.properties = {};
+    }
+    if (typeof node.properties.musical_audio_sync_on_switch !== "boolean") {
+        node.properties.musical_audio_sync_on_switch = true;
+    }
+    return node.properties.musical_audio_sync_on_switch;
+}
+
 app.registerExtension({
     name: "comfyui-musical-audio.MusicalLoadAudioUI",
     async beforeRegisterNodeDef(nodeType, nodeData, appInstance) {
@@ -195,12 +208,16 @@ app.registerExtension({
             if (this.cancelMusicalAudioResizeHeightSync) {
                 this.cancelMusicalAudioResizeHeightSync();
             }
+            if (this.clearMusicalAudioSyncFeedback) {
+                this.clearMusicalAudioSyncFeedback();
+            }
             return onRemoved ? onRemoved.apply(this, arguments) : undefined;
         };
 
         nodeType.prototype.onConfigure = function () {
             this._configuringMusicalAudio = true;
             const result = onConfigure ? onConfigure.apply(this, arguments) : undefined;
+            syncOnSwitchEnabled(this);
             setTimeout(() => {
                 if (this._musicalAudioRemoved) return;
                 this._configuringMusicalAudio = false;
@@ -215,6 +232,7 @@ app.registerExtension({
         nodeType.prototype.onNodeCreated = function () {
             const result = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
             const node = this;
+            syncOnSwitchEnabled(node);
             node._initializingMusicalAudio = true;
             node._shouldResetSecondsTrim = false;
             node._musicalAudioRemoved = false;
@@ -299,7 +317,7 @@ app.registerExtension({
             playerWrapper.appendChild(audioEl);
             container.appendChild(playerWrapper);
 
-            // 3. Mode and snap toolbar.
+            // 3. Mode, synchronization, and snap toolbar.
             const toolbar = makeElement("div", "musical-audio-ui__toolbar");
             const modeGroup = makeElement("div", "musical-audio-ui__mode-group");
             const modeButtons = new Map();
@@ -309,12 +327,51 @@ app.registerExtension({
                 modeButtons.set(mode, button);
                 modeGroup.appendChild(button);
             }
+            const syncWrap = makeElement("label", "musical-audio-ui__sync");
+            syncWrap.title = "Copy the active selection into the other time model when switching modes.";
+            const syncLabel = makeElement("span", "musical-audio-ui__sync-label", "Sync");
+            const syncInput = makeElement("input", "musical-audio-ui__sync-input");
+            syncInput.type = "checkbox";
+            syncInput.checked = syncOnSwitchEnabled(node);
+            syncInput.setAttribute("aria-label", "Sync on switch");
+            const syncSwitch = makeElement("span", "musical-audio-ui__sync-switch");
+            syncSwitch.setAttribute("aria-hidden", "true");
+            syncSwitch.appendChild(makeElement("span", "musical-audio-ui__sync-thumb"));
+            syncWrap.append(syncLabel, syncInput, syncSwitch);
             const snapWrap = makeElement("label", "musical-audio-ui__snap");
             snapWrap.appendChild(document.createTextNode("Snap"));
             const snapSelect = compactSelect(SNAP_MODES);
             snapWrap.appendChild(snapSelect);
-            toolbar.append(modeGroup, snapWrap);
+            toolbar.append(modeGroup, syncWrap, snapWrap);
             container.appendChild(toolbar);
+
+            const syncFeedback = makeElement(
+                "div",
+                "musical-audio-ui__sync-feedback",
+            );
+            syncFeedback.setAttribute("aria-live", "polite");
+            syncFeedback.setAttribute("aria-atomic", "true");
+            container.appendChild(syncFeedback);
+
+            let syncFeedbackTimer = null;
+            node.clearMusicalAudioSyncFeedback = () => {
+                if (syncFeedbackTimer !== null) {
+                    clearTimeout(syncFeedbackTimer);
+                    syncFeedbackTimer = null;
+                }
+                syncFeedback.classList.remove("is-visible");
+            };
+            const showSyncFeedback = (message) => {
+                node.clearMusicalAudioSyncFeedback();
+                if (node._musicalAudioRemoved) return;
+                syncFeedback.textContent = message;
+                syncFeedback.classList.add("is-visible");
+                syncFeedbackTimer = setTimeout(() => {
+                    syncFeedbackTimer = null;
+                    if (node._musicalAudioRemoved) return;
+                    syncFeedback.classList.remove("is-visible");
+                }, SYNC_FEEDBACK_DURATION_MS);
+            };
 
             // 4a. Seconds-mode controls.
             const secondsPanel = makeElement(
@@ -730,6 +787,7 @@ app.registerExtension({
                         button.classList.toggle("is-active", active);
                         button.setAttribute("aria-pressed", active ? "true" : "false");
                     }
+                    syncInput.checked = syncOnSwitchEnabled(node);
                     setControlValue(snapSelect, currentSnap(), force);
                     container.dataset.mode = state.mode.toLowerCase();
                     frameFallbackNote.classList.toggle(
@@ -979,6 +1037,18 @@ app.registerExtension({
                     return true;
                 };
 
+                const writeTransferredSecondsRange = (start, end) => {
+                    const safeStart = storedNumber(start);
+                    const safeEnd = storedNumber(end);
+                    if (safeStart === null || safeEnd === null) return false;
+                    const safeDuration = storedNumber(Math.max(0, safeEnd - safeStart));
+                    if (safeDuration === null) return false;
+                    setWidgetValue("start_time", safeStart);
+                    setWidgetValue("end_time", safeEnd);
+                    setWidgetValue("duration", safeDuration);
+                    return true;
+                };
+
                 const writeMusicalSelection = (startIndex, subdivisionCount) => {
                     const canonicalStart = subdivisionIndexToMusicalPosition(
                         Math.max(0, integerValue(startIndex, 0)),
@@ -1016,12 +1086,76 @@ app.registerExtension({
                     dirtyGraph(false);
                 };
 
+                const switchEditMode = (targetMode) => {
+                    const sourceMode = currentMode();
+                    if (targetMode === sourceMode || node._syncingMusicalAudioMode) return;
+
+                    node._syncingMusicalAudioMode = true;
+                    try {
+                        const sourceState = resolveSelection();
+                        let feedbackMessage = "";
+                        const shouldSync = syncOnSwitchEnabled(node);
+                        if (shouldSync) {
+                            if (sourceMode === "Seconds") {
+                                const converted = secondsRangeToMusicalSelection({
+                                    startSeconds: sourceState.start,
+                                    endSeconds: sourceState.end,
+                                }, sourceState.timing);
+                                writeMusicalSelection(
+                                    converted.startIndex,
+                                    converted.subdivisionCount,
+                                );
+                                const divisions = sourceState.timing.subdivisionsPerBeat;
+                                feedbackMessage = divisions === 1
+                                    ? "Synced \u00b7 beat grid"
+                                    : `Synced \u00b7 quantized to 1/${divisions}-beat grid`;
+                            } else {
+                                const converted = musicalSelectionToSecondsRange({
+                                    startIndex: sourceState.startIndex,
+                                    subdivisionCount: sourceState.subdivisionCount,
+                                }, sourceState.timing);
+                                const durationKnown = audioEl.readyState >= 1
+                                    && Number.isFinite(audioEl.duration)
+                                    && audioEl.duration >= 0;
+                                let start;
+                                let end;
+                                if (durationKnown) {
+                                    const availableDuration = Math.max(0, audioEl.duration);
+                                    start = clamp(converted.startSeconds, 0, availableDuration);
+                                    end = clamp(converted.endSeconds, start, availableDuration);
+                                } else {
+                                    start = Math.max(0, converted.startSeconds);
+                                    end = start + converted.durationSeconds;
+                                }
+                                writeTransferredSecondsRange(start, end);
+                                feedbackMessage = "Synced to seconds";
+                            }
+                        } else {
+                            node.clearMusicalAudioSyncFeedback();
+                        }
+
+                        setWidgetValue("edit_mode", targetMode);
+                        lastRulerKey = "";
+                        refreshUI(true, true, true);
+                        dirtyGraph(false);
+                        if (feedbackMessage) showSyncFeedback(feedbackMessage);
+                    } finally {
+                        node._syncingMusicalAudioMode = false;
+                    }
+                };
+
                 for (const [mode, button] of modeButtons) {
                     button.addEventListener("click", () => {
-                        setWidgetValue("edit_mode", mode);
-                        activeChangeComplete(true, visibleStructureChanged());
+                        switchEditMode(mode);
                     });
                 }
+                syncInput.addEventListener("change", () => {
+                    syncOnSwitchEnabled(node);
+                    if (node.properties.musical_audio_sync_on_switch === syncInput.checked) return;
+                    node.properties.musical_audio_sync_on_switch = syncInput.checked;
+                    if (!syncInput.checked) node.clearMusicalAudioSyncFeedback();
+                    dirtyGraph(false);
+                });
                 snapSelect.addEventListener("change", () => {
                     if (!SNAP_MODES.includes(snapSelect.value)) return;
                     setWidgetValue("snap_mode", snapSelect.value);
