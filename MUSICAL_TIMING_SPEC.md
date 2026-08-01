@@ -26,6 +26,14 @@ Default:
 
 The tempo unit defines which note value occurs bpm times per minute.
 
+## Real-number input validation
+
+bpm, fps, and downbeat_offset must be built-in Python integer or floating-point
+values. Boolean values are not accepted, and strings or other types are not
+silently coerced. All three values must be finite; NaN and positive or negative
+infinity are invalid. bpm and fps must be greater than zero. downbeat_offset may
+be negative, zero, or positive.
+
 ## Time signature
 
 The time signature is represented by:
@@ -84,6 +92,10 @@ downbeat_offset defines the absolute audio time of:
 
 The offset is measured in seconds.
 
+downbeat_offset may be negative. This can produce a negative start time and
+negative frame index in the pure timing core. A later audio integration layer
+must clamp calculated sample boundaries to the available waveform range.
+
 ## Musical start position
 
 Index rules:
@@ -91,6 +103,27 @@ Index rules:
     start_bar          is 1-based
     start_beat         is 1-based
     start_subdivision  is 0-based
+
+The following musical count and index inputs must be built-in Python integer
+values:
+
+    beats_per_bar
+    beat_unit
+    subdivisions_per_beat
+    start_bar
+    start_beat
+    start_subdivision
+    duration_bars
+    duration_beats
+    duration_subdivisions
+
+Floating-point values such as 1.0 and boolean values such as True are not
+accepted as integers.
+
+start_subdivision may be greater than or equal to subdivisions_per_beat. The
+pure calculation core applies nonnegative overflow arithmetically without
+normalizing or rejecting it. Only start_beat is restricted to the range from 1
+through beats_per_bar. A later UI may enforce canonical ranges.
 
 The number of beats between Bar 1 / Beat 1 and the selected start position is:
 
@@ -112,6 +145,11 @@ Duration fields are quantities and therefore start at zero:
     duration_bars
     duration_beats
     duration_subdivisions
+
+duration_beats may exceed beats_per_bar, and duration_subdivisions may be
+greater than or equal to subdivisions_per_beat. The pure calculation core
+applies these nonnegative quantities arithmetically without upper-range
+restrictions or normalization. A later UI may enforce canonical ranges.
 
     duration_beats_total =
         duration_bars * beats_per_bar
@@ -139,10 +177,19 @@ Frame calculations use the configured fps value.
 frames_per_beat and frames_per_bar remain floating-point values. They must not be truncated to integers.
 
     start_frame =
-        round(start_seconds * fps)
+        round_half_away_from_zero(start_seconds * fps)
 
     frame_count =
-        round(duration_seconds * fps)
+        round_half_away_from_zero(duration_seconds * fps)
+
+round_half_away_from_zero rounds to the nearest integer. Exact half ties round
+away from zero:
+
+    0.5  ->  1
+    1.5  ->  2
+    2.5  ->  3
+    -0.5 -> -1
+    -1.5 -> -2
 
 Frame rounding is applied only when producing discrete frame indices or frame counts.
 
@@ -156,7 +203,8 @@ Audio trimming remains sample-based.
     end_sample =
         round(end_seconds * sample_rate)
 
-The sample indices must be clamped to the valid waveform range.
+The later audio integration layer must clamp the sample indices to the valid
+waveform range.
 
 Video frame rounding must not alter the audio sample boundaries.
 
