@@ -41,6 +41,19 @@ const HIDDEN_WIDGETS = [
 const TEMPO_UNITS = ["Quarter", "Eighth", "Dotted Quarter"];
 const SNAP_MODES = ["Off", "Bar", "Beat", "Subdivision", "Video Frame"];
 const STORAGE_PRECISION = 1_000_000;
+const STYLESHEET_ID = "comfyui-musical-audio-styles";
+
+function ensureStylesheet() {
+    if (document.getElementById(STYLESHEET_ID)) return;
+
+    const link = document.createElement("link");
+    link.id = STYLESHEET_ID;
+    link.rel = "stylesheet";
+    link.href = new URL("./musical_audio_ui.css", import.meta.url).href;
+    document.head.appendChild(link);
+}
+
+ensureStylesheet();
 
 function hideWidget(widget) {
     if (!widget) return;
@@ -84,49 +97,21 @@ function storedNumber(value) {
     return Object.is(rounded, -0) ? 0 : rounded;
 }
 
-function applyStyle(element, style) {
-    Object.assign(element.style, style);
-    return element;
-}
-
-function makeElement(tag, style = {}, text = "") {
-    const element = applyStyle(document.createElement(tag), style);
+function makeElement(tag, className = "", text = "") {
+    const element = document.createElement(tag);
+    if (className) element.className = className;
     if (text) element.textContent = text;
     return element;
 }
 
 function compactInput(type = "number") {
-    const input = makeElement("input", {
-        width: "100%",
-        minWidth: "0",
-        height: "24px",
-        padding: "2px 6px",
-        boxSizing: "border-box",
-        color: "#e5e7eb",
-        background: "#15191f",
-        border: "1px solid #3b414b",
-        borderRadius: "4px",
-        fontSize: "11px",
-        outline: "none",
-    });
+    const input = makeElement("input", "musical-audio-ui__input");
     input.type = type;
     return input;
 }
 
 function compactSelect(values) {
-    const select = makeElement("select", {
-        width: "100%",
-        minWidth: "0",
-        height: "24px",
-        padding: "2px 5px",
-        boxSizing: "border-box",
-        color: "#e5e7eb",
-        background: "#15191f",
-        border: "1px solid #3b414b",
-        borderRadius: "4px",
-        fontSize: "11px",
-        outline: "none",
-    });
+    const select = makeElement("select", "musical-audio-ui__select");
     for (const value of values) {
         const option = document.createElement("option");
         option.value = value;
@@ -137,16 +122,8 @@ function compactSelect(values) {
 }
 
 function makeField(labelText, control) {
-    const field = makeElement("label", {
-        display: "flex",
-        flexDirection: "column",
-        gap: "3px",
-        minWidth: "0",
-        color: "#9ca3af",
-        fontSize: "9px",
-        lineHeight: "1.1",
-    });
-    field.appendChild(document.createTextNode(labelText));
+    const field = makeElement("label", "musical-audio-ui__field");
+    field.appendChild(makeElement("span", "musical-audio-ui__field-label", labelText));
     field.appendChild(control);
     return field;
 }
@@ -260,133 +237,46 @@ app.registerExtension({
                 return false;
             };
 
-            const defaultBackground = "rgba(30, 30, 30, 0.94)";
-            const container = makeElement("div", {
-                display: "flex",
-                flexDirection: "column",
-                gap: "8px",
-                width: "100%",
-                minWidth: "0",
-                padding: "10px",
-                boxSizing: "border-box",
-                color: "#f3f4f6",
-                background: defaultBackground,
-                borderRadius: "6px",
-                fontFamily: "sans-serif",
-                marginTop: "8px",
-                flexShrink: "0",
-                transition: "background 0.2s",
-            });
+            const initialEditMode = node.widgets?.find(
+                (candidate) => candidate.name === "edit_mode",
+            )?.value;
+            const container = makeElement("div", "musical-audio-ui");
+            container.dataset.mode = initialEditMode === "Musical" ? "musical" : "seconds";
 
             // 1. Filename and selection summary.
-            const playerTop = makeElement("div", {
-                display: "flex",
-                gap: "8px",
-                justifyContent: "space-between",
-                alignItems: "center",
-                minWidth: "0",
-            });
-            const playerTitle = makeElement("span", {
-                flex: "1 1 auto",
-                minWidth: "0",
-                color: "#aeb4be",
-                fontSize: "11px",
-                whiteSpace: "nowrap",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-            }, "No audio selected");
-            const trimLength = makeElement("span", {
-                flex: "0 1 auto",
-                minWidth: "0",
-                maxWidth: "65%",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                color: "#38bdf8",
-                background: "rgba(56, 189, 248, 0.1)",
-                padding: "3px 6px",
-                borderRadius: "4px",
-                fontSize: "11px",
-                fontWeight: "bold",
-                whiteSpace: "nowrap",
-            }, "Trimmed: 0.000 s");
+            const playerTop = makeElement("div", "musical-audio-ui__header");
+            const playerTitle = makeElement(
+                "span",
+                "musical-audio-ui__title",
+                "No audio selected",
+            );
+            const trimLength = makeElement(
+                "span",
+                "musical-audio-ui__summary",
+                "Trimmed: 0.000 s",
+            );
             playerTop.append(playerTitle, trimLength);
             container.appendChild(playerTop);
 
             // 2. HTML audio player. The fixed wrapper keeps native controls out of flex shrink.
-            const playerWrapper = makeElement("div", {
-                display: "block",
-                width: "100%",
-                minWidth: "0",
-                height: "40px",
-                minHeight: "40px",
-                maxHeight: "40px",
-                flex: "0 0 40px",
-                flexShrink: "0",
-                overflow: "visible",
-                boxSizing: "border-box",
-            });
+            const playerWrapper = makeElement("div", "musical-audio-ui__player");
             const audioEl = document.createElement("audio");
             audioEl.controls = true;
-            applyStyle(audioEl, {
-                display: "block",
-                width: "100%",
-                minWidth: "0",
-                height: "40px",
-                minHeight: "40px",
-                maxHeight: "40px",
-                flex: "0 0 40px",
-                flexShrink: "0",
-                boxSizing: "border-box",
-                outline: "none",
-            });
+            audioEl.className = "musical-audio-ui__player-element";
             playerWrapper.appendChild(audioEl);
             container.appendChild(playerWrapper);
 
             // 3. Mode and snap toolbar.
-            const toolbar = makeElement("div", {
-                display: "flex",
-                flexWrap: "wrap",
-                gap: "6px",
-                alignItems: "center",
-                justifyContent: "space-between",
-            });
-            const modeGroup = makeElement("div", {
-                display: "grid",
-                gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-                flex: "1 1 145px",
-                minWidth: "0",
-                padding: "2px",
-                gap: "2px",
-                background: "#11151a",
-                border: "1px solid #343a44",
-                borderRadius: "5px",
-            });
+            const toolbar = makeElement("div", "musical-audio-ui__toolbar");
+            const modeGroup = makeElement("div", "musical-audio-ui__mode-group");
             const modeButtons = new Map();
             for (const mode of ["Seconds", "Musical"]) {
-                const button = makeElement("button", {
-                    minWidth: "0",
-                    height: "24px",
-                    padding: "2px 8px",
-                    color: "#aeb4be",
-                    background: "transparent",
-                    border: "0",
-                    borderRadius: "3px",
-                    fontSize: "11px",
-                    cursor: "pointer",
-                }, mode);
+                const button = makeElement("button", "musical-audio-ui__mode-button", mode);
                 button.type = "button";
                 modeButtons.set(mode, button);
                 modeGroup.appendChild(button);
             }
-            const snapWrap = makeElement("label", {
-                display: "flex",
-                flex: "1 1 180px",
-                minWidth: "0",
-                gap: "6px",
-                alignItems: "center",
-                color: "#9ca3af",
-                fontSize: "10px",
-            });
+            const snapWrap = makeElement("label", "musical-audio-ui__snap");
             snapWrap.appendChild(document.createTextNode("Snap"));
             const snapSelect = compactSelect(SNAP_MODES);
             snapWrap.appendChild(snapSelect);
@@ -394,12 +284,10 @@ app.registerExtension({
             container.appendChild(toolbar);
 
             // 4a. Seconds-mode controls.
-            const secondsPanel = makeElement("div", {
-                display: "grid",
-                gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-                gap: "6px",
-                minWidth: "0",
-            });
+            const secondsPanel = makeElement(
+                "div",
+                "musical-audio-ui__panel musical-audio-ui__panel--seconds",
+            );
             const secondsStartInput = compactInput();
             const secondsEndInput = compactInput();
             const secondsDurationInput = compactInput();
@@ -415,22 +303,11 @@ app.registerExtension({
             container.appendChild(secondsPanel);
 
             // 4b. Musical grid and selection controls.
-            const musicalPanel = makeElement("div", {
-                display: "none",
-                flexDirection: "column",
-                gap: "7px",
-                minWidth: "0",
-                padding: "8px",
-                background: "rgba(0, 0, 0, 0.22)",
-                border: "1px solid rgba(255, 255, 255, 0.06)",
-                borderRadius: "5px",
-            });
-            const gridControls = makeElement("div", {
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fit, minmax(min(82px, 100%), 1fr))",
-                gap: "6px",
-                minWidth: "0",
-            });
+            const musicalPanel = makeElement(
+                "div",
+                "musical-audio-ui__panel musical-audio-ui__panel--musical",
+            );
+            const gridControls = makeElement("div", "musical-audio-ui__grid-controls");
             const controlByWidget = new Map();
 
             const addNumericControl = (parent, widgetName, label, options = {}) => {
@@ -457,21 +334,17 @@ app.registerExtension({
             addNumericControl(gridControls, "subdivisions_per_beat", "Subdivisions / beat", { min: 1 });
             musicalPanel.appendChild(gridControls);
 
-            const selectionHeading = makeElement("div", {
-                color: "#7dd3fc",
-                fontSize: "9px",
-                fontWeight: "bold",
-                letterSpacing: "0.05em",
-                textTransform: "uppercase",
-            }, "Selection");
+            const selectionHeading = makeElement(
+                "div",
+                "musical-audio-ui__section-heading",
+                "Selection",
+            );
             musicalPanel.appendChild(selectionHeading);
 
-            const musicalSelection = makeElement("div", {
-                display: "grid",
-                gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-                gap: "6px",
-                minWidth: "0",
-            });
+            const musicalSelection = makeElement(
+                "div",
+                "musical-audio-ui__selection-controls",
+            );
             addNumericControl(musicalSelection, "start_bar", "Start · Bar", { min: 1 });
             addNumericControl(musicalSelection, "start_beat", "Start · Beat", { min: 1 });
             addNumericControl(musicalSelection, "start_subdivision", "Start · Sub", { min: 0 });
@@ -480,87 +353,41 @@ app.registerExtension({
             addNumericControl(musicalSelection, "duration_subdivisions", "Length · Subs", { min: 0 });
             musicalPanel.appendChild(musicalSelection);
 
-            const frameFallbackNote = makeElement("div", {
-                display: "none",
-                color: "#9ca3af",
-                fontSize: "9px",
-                fontStyle: "italic",
-            }, "Frame snap resolves to the nearest musical subdivision");
+            const frameFallbackNote = makeElement(
+                "div",
+                "musical-audio-ui__frame-note is-hidden",
+                "Frame snap resolves to the nearest musical subdivision",
+            );
             musicalPanel.appendChild(frameFallbackNote);
             container.appendChild(musicalPanel);
 
             // 5 and 6. Ruler and selection timeline.
-            const trimArea = makeElement("div", {
-                display: "flex",
-                flexDirection: "column",
-                gap: "5px",
-                minWidth: "0",
-                padding: "9px",
-                background: "rgba(0, 0, 0, 0.35)",
-                border: "1px solid rgba(255, 255, 255, 0.05)",
-                borderRadius: "6px",
-            });
-            const timeRuler = makeElement("div", {
-                position: "relative",
-                width: "100%",
-                minWidth: "0",
-                height: "22px",
-                color: "#aaa",
-                fontSize: "9px",
-                pointerEvents: "none",
-                userSelect: "none",
-                overflow: "hidden",
-            });
+            const trimArea = makeElement("div", "musical-audio-ui__trim-area");
+            const timeRuler = makeElement("div", "musical-audio-ui__ruler");
             trimArea.appendChild(timeRuler);
 
-            const sliderBox = makeElement("div", {
-                position: "relative",
-                width: "100%",
-                minWidth: "0",
-                height: "26px",
-                background: "#0d1014",
-                borderRadius: "4px",
-                cursor: "pointer",
-                userSelect: "none",
-                touchAction: "none",
-                overflow: "hidden",
-                boxShadow: "inset 0 1px 3px rgba(0, 0, 0, 0.6)",
-            });
-            const fill = makeElement("div", {
-                position: "absolute",
-                top: "0",
-                height: "100%",
-                background: "rgba(14, 165, 233, 0.35)",
-                pointerEvents: "none",
-            });
+            const sliderBox = makeElement("div", "musical-audio-ui__timeline");
+            const fill = makeElement("div", "musical-audio-ui__selection");
             sliderBox.appendChild(fill);
 
-            const makeHandle = () => makeElement("div", {
-                position: "absolute",
-                top: "0",
-                width: "8px",
-                height: "100%",
-                background: "#38bdf8",
-                borderRadius: "2px",
-                transform: "translateX(-50%)",
-                pointerEvents: "none",
-                boxShadow: "0 0 4px rgba(0, 0, 0, 0.8)",
-            });
-            const startHandle = makeHandle();
-            const endHandle = makeHandle();
+            const startHandle = makeElement(
+                "div",
+                "musical-audio-ui__handle musical-audio-ui__handle--start",
+            );
+            const endHandle = makeElement(
+                "div",
+                "musical-audio-ui__handle musical-audio-ui__handle--end",
+            );
             sliderBox.append(startHandle, endHandle);
             trimArea.appendChild(sliderBox);
             container.appendChild(trimArea);
 
             // 7. Compact position/status line.
-            const statusLine = makeElement("div", {
-                minWidth: "0",
-                color: "#9ca3af",
-                fontSize: "9px",
-                lineHeight: "1.25",
-                whiteSpace: "normal",
-                overflowWrap: "anywhere",
-            }, "Seconds · 0.000–0.000 s · Frames 0–0");
+            const statusLine = makeElement(
+                "div",
+                "musical-audio-ui__status",
+                "Seconds · 0.000–0.000 s · Frames 0–0",
+            );
             container.appendChild(statusLine);
 
             const domWidget = node.addDOMWidget("audio_ui", "audio_ui", container);
@@ -666,11 +493,10 @@ app.registerExtension({
 
                 const visibleStructureChanged = () => {
                     const musical = currentMode() === "Musical";
-                    return secondsPanel.style.display !== (musical ? "none" : "grid")
-                        || musicalPanel.style.display !== (musical ? "flex" : "none")
-                        || frameFallbackNote.style.display !== (
-                            musical && currentSnap() === "Video Frame" ? "block" : "none"
-                        );
+                    const mode = musical ? "musical" : "seconds";
+                    const frameNoteHidden = !(musical && currentSnap() === "Video Frame");
+                    return container.dataset.mode !== mode
+                        || frameFallbackNote.classList.contains("is-hidden") !== frameNoteHidden;
                 };
 
                 const readTiming = () => {
@@ -778,16 +604,15 @@ app.registerExtension({
                 const syncControls = (state, force = false) => {
                     for (const [mode, button] of modeButtons) {
                         const active = mode === state.mode;
-                        button.style.background = active ? "#0ea5e9" : "transparent";
-                        button.style.color = active ? "#ffffff" : "#aeb4be";
+                        button.classList.toggle("is-active", active);
                         button.setAttribute("aria-pressed", active ? "true" : "false");
                     }
                     setControlValue(snapSelect, currentSnap(), force);
-                    secondsPanel.style.display = state.mode === "Seconds" ? "grid" : "none";
-                    musicalPanel.style.display = state.mode === "Musical" ? "flex" : "none";
-                    frameFallbackNote.style.display = (
-                        state.mode === "Musical" && currentSnap() === "Video Frame"
-                    ) ? "block" : "none";
+                    container.dataset.mode = state.mode.toLowerCase();
+                    frameFallbackNote.classList.toggle(
+                        "is-hidden",
+                        !(state.mode === "Musical" && currentSnap() === "Video Frame"),
+                    );
 
                     setControlValue(
                         secondsStartInput,
@@ -816,37 +641,34 @@ app.registerExtension({
                 };
 
                 const addRulerTick = (percentage, strength, label = "", highlight = false) => {
-                    const wrapper = makeElement("div", {
-                        position: "absolute",
-                        left: `${percentage}%`,
-                        top: "0",
-                        display: "flex",
-                        flexDirection: "column",
-                        alignItems: percentage <= 0 ? "flex-start" : percentage >= 100 ? "flex-end" : "center",
-                        transform: percentage <= 0 ? "none" : percentage >= 100 ? "translateX(-100%)" : "translateX(-50%)",
-                    });
-                    const heights = { subdivision: 4, beat: 7, bar: 10 };
-                    const colors = { subdivision: "#374151", beat: "#737b87", bar: "#d1d5db" };
-                    const line = makeElement("div", {
-                        width: strength === "bar" ? "2px" : "1px",
-                        height: `${heights[strength]}px`,
-                        marginBottom: "2px",
-                        background: highlight ? "#38bdf8" : colors[strength],
-                        borderRadius: "1px",
-                    });
-                    wrapper.appendChild(line);
+                    const classes = [
+                        "musical-audio-ui__tick",
+                        `musical-audio-ui__tick--${strength}`,
+                    ];
+                    if (highlight) classes.push("is-active");
+                    const wrapper = makeElement("div", classes.join(" "));
+                    wrapper.style.setProperty("--mau-tick-position", `${percentage}%`);
+                    wrapper.style.setProperty(
+                        "--mau-tick-align",
+                        percentage <= 0 ? "flex-start" : percentage >= 100 ? "flex-end" : "center",
+                    );
+                    wrapper.style.setProperty(
+                        "--mau-tick-transform",
+                        percentage <= 0
+                            ? "none"
+                            : percentage >= 100 ? "translateX(-100%)" : "translateX(-50%)",
+                    );
                     if (label) {
-                        wrapper.appendChild(makeElement("div", {
-                            color: highlight ? "#7dd3fc" : "#aeb4be",
-                            fontWeight: strength === "bar" ? "bold" : "normal",
-                            whiteSpace: "nowrap",
-                        }, label));
+                        wrapper.appendChild(makeElement(
+                            "div",
+                            "musical-audio-ui__tick-label",
+                            label,
+                        ));
                     }
                     timeRuler.appendChild(wrapper);
                 };
 
                 const renderSecondsRuler = () => {
-                    timeRuler.style.height = "22px";
                     const majorTicks = 5;
                     const subdivisions = 4;
                     const totalTicks = (majorTicks - 1) * subdivisions;
@@ -862,16 +684,12 @@ app.registerExtension({
                 };
 
                 const renderMusicalRuler = (timing) => {
-                    timeRuler.style.height = "28px";
                     if (timing.downbeatOffset > 0) {
                         const mutedWidth = clamp((timing.downbeatOffset / audioDuration) * 100, 0, 100);
-                        timeRuler.appendChild(makeElement("div", {
-                            position: "absolute",
-                            inset: `0 auto 0 0`,
-                            width: `${mutedWidth}%`,
-                            background: "rgba(107, 114, 128, 0.09)",
-                            borderRight: mutedWidth < 100 ? "1px dashed #4b5563" : "0",
-                        }));
+                        const preroll = makeElement("div", "musical-audio-ui__preroll");
+                        preroll.style.setProperty("--mau-preroll-width", `${mutedWidth}%`);
+                        preroll.classList.toggle("is-complete", mutedWidth >= 100);
+                        timeRuler.appendChild(preroll);
                     }
 
                     const secondsPerSubdivision = timing.secondsPerSubdivision;
@@ -939,12 +757,18 @@ app.registerExtension({
                 const renderSelection = (state) => {
                     const startPercentage = audioDuration > 0 ? (state.start / audioDuration) * 100 : 0;
                     const endPercentage = audioDuration > 0 ? (state.end / audioDuration) * 100 : 0;
-                    startHandle.style.left = `${startPercentage}%`;
-                    endHandle.style.left = `${endPercentage}%`;
-                    fill.style.left = `${startPercentage}%`;
+                    startHandle.style.setProperty("--mau-handle-position", `${startPercentage}%`);
+                    endHandle.style.setProperty("--mau-handle-position", `${endPercentage}%`);
+                    fill.style.setProperty("--mau-selection-start", `${startPercentage}%`);
                     const width = Math.max(0, endPercentage - startPercentage);
-                    fill.style.width = width > 0 ? `${width}%` : "2px";
-                    fill.style.transform = width === 0 && startPercentage >= 100 ? "translateX(-2px)" : "none";
+                    fill.style.setProperty(
+                        "--mau-selection-width",
+                        width > 0 ? `${width}%` : "2px",
+                    );
+                    fill.classList.toggle(
+                        "is-collapsed-at-end",
+                        width === 0 && startPercentage >= 100,
+                    );
 
                     if (state.mode === "Musical") {
                         const canonicalLength = subdivisionCountToDurationFields(
@@ -1341,17 +1165,17 @@ app.registerExtension({
                 container.addEventListener("dragover", (event) => {
                     event.preventDefault();
                     event.stopPropagation();
-                    container.style.background = "rgba(14, 165, 233, 0.2)";
+                    container.classList.add("is-dragging");
                 });
                 container.addEventListener("dragleave", (event) => {
                     event.preventDefault();
                     event.stopPropagation();
-                    container.style.background = defaultBackground;
+                    container.classList.remove("is-dragging");
                 });
                 container.addEventListener("drop", (event) => {
                     event.preventDefault();
                     event.stopPropagation();
-                    container.style.background = defaultBackground;
+                    container.classList.remove("is-dragging");
                     const file = event.dataTransfer?.files?.[0];
                     if (file) handleFileUpload(file);
                 });

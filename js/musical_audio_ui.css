@@ -1,0 +1,381 @@
+.musical-audio-ui {
+    --mau-bg: rgba(30, 30, 30, 0.94);
+    --mau-panel-bg: rgba(0, 0, 0, 0.22);
+    --mau-control-bg: #15191f;
+    --mau-control-bg-dark: #11151a;
+    --mau-border: #3b414b;
+    --mau-border-subtle: rgba(255, 255, 255, 0.06);
+    --mau-text: #f3f4f6;
+    --mau-muted: #9ca3af;
+    --mau-accent: #38bdf8;
+    --mau-accent-strong: #0ea5e9;
+    --mau-accent-soft: rgba(56, 189, 248, 0.1);
+    --mau-accent-border: #38bdf8;
+    --mau-radius: 6px;
+    --mau-radius-small: 4px;
+    --mau-gap: 8px;
+    --mau-gap-small: 6px;
+    --mau-control-height: 24px;
+    --mau-player-height: 40px;
+    --mau-timeline-height: 26px;
+
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    gap: var(--mau-gap);
+    width: 100%;
+    min-width: 0;
+    margin-top: 8px;
+    padding: 10px;
+    box-sizing: border-box;
+    color: var(--mau-text);
+    background: var(--mau-bg);
+    border-radius: var(--mau-radius);
+    font-family: sans-serif;
+    transition: background 0.2s;
+}
+
+.musical-audio-ui.is-dragging {
+    background: rgba(14, 165, 233, 0.2);
+}
+
+.musical-audio-ui .musical-audio-ui__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--mau-gap);
+    min-width: 0;
+}
+
+.musical-audio-ui .musical-audio-ui__title {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    color: #aeb4be;
+    font-size: 11px;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.musical-audio-ui .musical-audio-ui__summary {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 65%;
+    overflow: hidden;
+    padding: 3px 6px;
+    color: var(--mau-accent);
+    background: var(--mau-accent-soft);
+    border-radius: var(--mau-radius-small);
+    font-size: 11px;
+    font-weight: bold;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.musical-audio-ui .musical-audio-ui__player {
+    display: block;
+    flex: 0 0 var(--mau-player-height);
+    flex-shrink: 0;
+    width: 100%;
+    min-width: 0;
+    height: var(--mau-player-height);
+    min-height: var(--mau-player-height);
+    max-height: var(--mau-player-height);
+    overflow: visible;
+    box-sizing: border-box;
+}
+
+.musical-audio-ui .musical-audio-ui__player-element {
+    display: block;
+    flex: 0 0 var(--mau-player-height);
+    flex-shrink: 0;
+    width: 100%;
+    min-width: 0;
+    height: var(--mau-player-height);
+    min-height: var(--mau-player-height);
+    max-height: var(--mau-player-height);
+    box-sizing: border-box;
+    outline: none;
+}
+
+.musical-audio-ui .musical-audio-ui__toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--mau-gap-small);
+}
+
+.musical-audio-ui .musical-audio-ui__mode-group {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    flex: 1 1 145px;
+    min-width: 0;
+    gap: 2px;
+    padding: 2px;
+    background: var(--mau-control-bg-dark);
+    border: 1px solid #343a44;
+    border-radius: 5px;
+}
+
+.musical-audio-ui .musical-audio-ui__mode-button {
+    min-width: 0;
+    height: var(--mau-control-height);
+    padding: 2px 8px;
+    color: #aeb4be;
+    background: transparent;
+    border: 0;
+    border-radius: 3px;
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.musical-audio-ui .musical-audio-ui__mode-button.is-active {
+    color: #ffffff;
+    background: var(--mau-accent-strong);
+}
+
+.musical-audio-ui .musical-audio-ui__mode-button:focus-visible {
+    outline: 2px solid var(--mau-accent-border);
+    outline-offset: 1px;
+}
+
+.musical-audio-ui .musical-audio-ui__snap {
+    display: flex;
+    align-items: center;
+    flex: 1 1 180px;
+    min-width: 0;
+    gap: var(--mau-gap-small);
+    color: var(--mau-muted);
+    font-size: 10px;
+}
+
+.musical-audio-ui .musical-audio-ui__panel {
+    min-width: 0;
+}
+
+.musical-audio-ui[data-mode="seconds"] .musical-audio-ui__panel--seconds {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: var(--mau-gap-small);
+}
+
+.musical-audio-ui[data-mode="seconds"] .musical-audio-ui__panel--musical {
+    display: none;
+}
+
+.musical-audio-ui[data-mode="musical"] .musical-audio-ui__panel--seconds {
+    display: none;
+}
+
+.musical-audio-ui[data-mode="musical"] .musical-audio-ui__panel--musical {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    padding: 8px;
+    background: var(--mau-panel-bg);
+    border: 1px solid var(--mau-border-subtle);
+    border-radius: 5px;
+}
+
+.musical-audio-ui .musical-audio-ui__grid-controls {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(82px, 100%), 1fr));
+    gap: var(--mau-gap-small);
+    min-width: 0;
+}
+
+.musical-audio-ui .musical-audio-ui__selection-controls {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: var(--mau-gap-small);
+    min-width: 0;
+}
+
+.musical-audio-ui .musical-audio-ui__section-heading {
+    color: #7dd3fc;
+    font-size: 9px;
+    font-weight: bold;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+
+.musical-audio-ui .musical-audio-ui__field {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+    color: var(--mau-muted);
+    font-size: 9px;
+    line-height: 1.1;
+}
+
+.musical-audio-ui .musical-audio-ui__field-label {
+    display: block;
+}
+
+.musical-audio-ui .musical-audio-ui__input,
+.musical-audio-ui .musical-audio-ui__select {
+    width: 100%;
+    min-width: 0;
+    height: var(--mau-control-height);
+    padding: 2px 6px;
+    box-sizing: border-box;
+    color: #e5e7eb;
+    background: var(--mau-control-bg);
+    border: 1px solid var(--mau-border);
+    border-radius: var(--mau-radius-small);
+    font-size: 11px;
+    outline: none;
+}
+
+.musical-audio-ui .musical-audio-ui__select {
+    padding-right: 5px;
+    padding-left: 5px;
+}
+
+.musical-audio-ui .musical-audio-ui__trim-area {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    min-width: 0;
+    padding: 9px;
+    background: rgba(0, 0, 0, 0.35);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: var(--mau-radius);
+}
+
+.musical-audio-ui .musical-audio-ui__ruler {
+    position: relative;
+    width: 100%;
+    min-width: 0;
+    height: 22px;
+    overflow: hidden;
+    color: #aaaaaa;
+    font-size: 9px;
+    pointer-events: none;
+    user-select: none;
+}
+
+.musical-audio-ui[data-mode="musical"] .musical-audio-ui__ruler {
+    height: 28px;
+}
+
+.musical-audio-ui .musical-audio-ui__tick {
+    position: absolute;
+    top: 0;
+    left: var(--mau-tick-position);
+    display: flex;
+    flex-direction: column;
+    align-items: var(--mau-tick-align);
+    transform: var(--mau-tick-transform);
+}
+
+.musical-audio-ui .musical-audio-ui__tick::before {
+    width: 1px;
+    height: 4px;
+    margin-bottom: 2px;
+    background: #374151;
+    border-radius: 1px;
+    content: "";
+}
+
+.musical-audio-ui .musical-audio-ui__tick--beat::before {
+    height: 7px;
+    background: #737b87;
+}
+
+.musical-audio-ui .musical-audio-ui__tick--bar::before {
+    width: 2px;
+    height: 10px;
+    background: #d1d5db;
+}
+
+.musical-audio-ui .musical-audio-ui__tick.is-active::before {
+    background: var(--mau-accent);
+}
+
+.musical-audio-ui .musical-audio-ui__tick-label {
+    color: #aeb4be;
+    white-space: nowrap;
+}
+
+.musical-audio-ui .musical-audio-ui__tick--bar .musical-audio-ui__tick-label {
+    font-weight: bold;
+}
+
+.musical-audio-ui .musical-audio-ui__tick.is-active .musical-audio-ui__tick-label {
+    color: #7dd3fc;
+}
+
+.musical-audio-ui .musical-audio-ui__preroll {
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: var(--mau-preroll-width);
+    background: rgba(107, 114, 128, 0.09);
+    border-right: 1px dashed #4b5563;
+}
+
+.musical-audio-ui .musical-audio-ui__preroll.is-complete {
+    border-right: 0;
+}
+
+.musical-audio-ui .musical-audio-ui__timeline {
+    position: relative;
+    width: 100%;
+    min-width: 0;
+    height: var(--mau-timeline-height);
+    overflow: hidden;
+    background: #0d1014;
+    border-radius: var(--mau-radius-small);
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.6);
+    cursor: pointer;
+    touch-action: none;
+    user-select: none;
+}
+
+.musical-audio-ui .musical-audio-ui__selection {
+    position: absolute;
+    top: 0;
+    left: var(--mau-selection-start);
+    width: var(--mau-selection-width);
+    height: 100%;
+    background: rgba(14, 165, 233, 0.35);
+    pointer-events: none;
+}
+
+.musical-audio-ui .musical-audio-ui__selection.is-collapsed-at-end {
+    transform: translateX(-2px);
+}
+
+.musical-audio-ui .musical-audio-ui__handle {
+    position: absolute;
+    top: 0;
+    left: var(--mau-handle-position);
+    width: 8px;
+    height: 100%;
+    background: var(--mau-accent);
+    border-radius: 2px;
+    box-shadow: 0 0 4px rgba(0, 0, 0, 0.8);
+    transform: translateX(-50%);
+    pointer-events: none;
+}
+
+.musical-audio-ui .musical-audio-ui__frame-note {
+    color: var(--mau-muted);
+    font-size: 9px;
+    font-style: italic;
+}
+
+.musical-audio-ui .is-hidden {
+    display: none;
+}
+
+.musical-audio-ui .musical-audio-ui__status {
+    min-width: 0;
+    color: var(--mau-muted);
+    font-size: 9px;
+    line-height: 1.25;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
