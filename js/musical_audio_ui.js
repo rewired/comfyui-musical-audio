@@ -19,9 +19,9 @@ function hideWidget(w) {
 }
 
 app.registerExtension({
-    name: "Comfy.LoadAudioUI",
+    name: "comfyui-musical-audio.MusicalLoadAudioUI",
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
-        if (nodeData.name === "LoadAudioUI") {
+        if (nodeData.name === "MusicalLoadAudioUI") {
             const onNodeCreated = nodeType.prototype.onNodeCreated;
             const onDrawBackground = nodeType.prototype.onDrawBackground;
             const onConfigure = nodeType.prototype.onConfigure;

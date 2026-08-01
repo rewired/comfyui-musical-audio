@@ -39,7 +39,7 @@ def load_audio_file(filepath: str) -> tuple[torch.Tensor, int]:
         return wav, sr
 
 
-class LoadAudioUI:
+class MusicalLoadAudioUI:
     @classmethod
     def INPUT_TYPES(s):
         try:
@@ -75,7 +75,7 @@ class LoadAudioUI:
             }
         }
 
-    CATEGORY = "WhatDreamsCost"
+    CATEGORY = "Musical Audio"
     RETURN_TYPES = ("AUDIO", "FLOAT", "STRING")
     RETURN_NAMES = ("audio", "duration", "filename")
     FUNCTION = "load_audio"
@@ -101,7 +101,7 @@ class LoadAudioUI:
         # If the file is 'none' or doesn't exist on disk, provide 1 second of silence
         if audio == "none" or not audio_path or not os.path.exists(audio_path):
             missing_info = audio if audio != "none" else "None selected"
-            print(f"!!! [LoadAudioUI] Warning: Audio file '{missing_info}' not found. Outputting 1 second of silence.")
+            print(f"!!! [MusicalLoadAudioUI] Warning: Audio file '{missing_info}' not found. Outputting 1 second of silence.")
             
             sample_rate = 44100
             # 1 second of silence (stereo) -> shape [channels, time]
@@ -111,7 +111,7 @@ class LoadAudioUI:
                 waveform, sample_rate = load_audio_file(audio_path)
             except Exception as e:
                 # If decoding fails for any reason, fallback to silence rather than crashing the workflow
-                print(f"!!! [LoadAudioUI] Error decoding {audio}: {e}. Falling back to silence.")
+                print(f"!!! [MusicalLoadAudioUI] Error decoding {audio}: {e}. Falling back to silence.")
                 sample_rate = 44100
                 waveform = torch.zeros((2, 44100))
 
