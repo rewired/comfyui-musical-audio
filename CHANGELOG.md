@@ -6,6 +6,16 @@ This changelog uses a simple structure inspired by Keep a Changelog.
 
 No unreleased changes are currently documented.
 
+## [0.1.1] - 2026-08-01
+
+### Fixed
+
+- Prevented the native audio player from collapsing in Musical mode under legacy ComfyUI node rendering.
+- Prevented timeline dragging from progressively shrinking the custom node UI.
+- Separated node-width synchronization from structural height calculation.
+- Prevented high-frequency timeline pointer movement from triggering node resizing.
+- Preserved stable layout behavior in both legacy node rendering and Node 2.0 mode.
+
 ## [0.1.0] - 2026-08-01
 
 ### Added
