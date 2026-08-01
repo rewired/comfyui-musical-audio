@@ -667,14 +667,18 @@ app.registerExtension({
                     ? "Musical"
                     : "Seconds";
 
-                const currentSnap = () => SNAP_MODES.includes(widgetValue("snap_mode", "Off"))
+                const storedSnapMode = () => SNAP_MODES.includes(widgetValue("snap_mode", "Off"))
                     ? widgetValue("snap_mode", "Off")
+                    : "Off";
+
+                const effectiveSnapMode = () => currentMode() === "Musical"
+                    ? storedSnapMode()
                     : "Off";
 
                 const visibleStructureChanged = () => {
                     const musical = currentMode() === "Musical";
                     const mode = musical ? "musical" : "seconds";
-                    const frameNoteHidden = !(musical && currentSnap() === "Video Frame");
+                    const frameNoteHidden = effectiveSnapMode() !== "Video Frame";
                     return container.dataset.mode !== mode
                         || frameFallbackNote.classList.contains("is-hidden") !== frameNoteHidden;
                 };
@@ -788,11 +792,11 @@ app.registerExtension({
                         button.setAttribute("aria-pressed", active ? "true" : "false");
                     }
                     syncInput.checked = syncOnSwitchEnabled(node);
-                    setControlValue(snapSelect, currentSnap(), force);
+                    setControlValue(snapSelect, storedSnapMode(), force);
                     container.dataset.mode = state.mode.toLowerCase();
                     frameFallbackNote.classList.toggle(
                         "is-hidden",
-                        !(state.mode === "Musical" && currentSnap() === "Video Frame"),
+                        effectiveSnapMode() !== "Video Frame",
                     );
 
                     setControlValue(
@@ -1288,7 +1292,7 @@ app.registerExtension({
                 const applyPointer = (pointerSeconds) => {
                     if (!dragging || !(audioDuration > 0)) return;
                     const state = resolveSelection();
-                    const snap = currentSnap();
+                    const snap = effectiveSnapMode();
                     if (state.mode === "Seconds") {
                         if (dragging.kind === "start") {
                             const start = Math.min(
@@ -1355,7 +1359,7 @@ app.registerExtension({
                             offsetSeconds: pointerSeconds - state.start,
                             durationSeconds: state.selectionDuration,
                             offsetSubdivisions: state.mode === "Musical"
-                                ? musicalPointerIndex(pointerSeconds, state.timing, currentSnap()) - state.startIndex
+                                ? musicalPointerIndex(pointerSeconds, state.timing, effectiveSnapMode()) - state.startIndex
                                 : 0,
                         };
                     } else if (Math.abs(pointerSeconds - state.start) <= Math.abs(pointerSeconds - state.end)) {

@@ -262,6 +262,10 @@
     font-size: 10px;
 }
 
+.musical-audio-ui[data-mode="seconds"] .musical-audio-ui__snap {
+    display: none;
+}
+
 .musical-audio-ui .musical-audio-ui__panel {
     min-width: 0;
 }
