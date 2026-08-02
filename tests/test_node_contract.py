@@ -15,6 +15,7 @@ FRONTEND_SOURCE = REPO_ROOT / "js" / "musical_audio_ui.js"
 FRONTEND_STYLESHEET = REPO_ROOT / "js" / "musical_audio_ui.css"
 AUDIO_TRANSPORT_SOURCE = REPO_ROOT / "js" / "audio_transport.js"
 PLAYHEAD_SOURCE = REPO_ROOT / "js" / "playhead.js"
+WAVEFORM_EDITOR_DIALOG_SOURCE = REPO_ROOT / "js" / "waveform_editor_dialog.js"
 
 EXPECTED_WIDGETS = (
     "audio",
@@ -606,6 +607,126 @@ class StaticNodeContractTests(unittest.TestCase):
         self.assertIn("--mau-timeline-height: 80px", stylesheet)
         timeline_rule = rule(".musical-audio-ui .musical-audio-ui__timeline")
         self.assertIn("height: var(--mau-timeline-height)", timeline_rule)
+
+    def test_waveform_editor_dialog_spike_uses_public_node_local_lifecycle(self) -> None:
+        source = FRONTEND_SOURCE.read_text(encoding="utf-8")
+        dialog_source = WAVEFORM_EDITOR_DIALOG_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn(
+            'from "./waveform_editor_dialog.js";',
+            source,
+        )
+        self.assertEqual(source.count('"musical-audio-ui__editor-button"'), 1)
+        self.assertEqual(source.count("const openEditorButton = makeElement("), 1)
+        self.assertEqual(source.count('openEditorButton.addEventListener("click"'), 1)
+        self.assertIn('openEditorButton.type = "button";', source)
+        self.assertIn(
+            'openEditorButton.setAttribute("aria-label", "Open waveform editor")',
+            source,
+        )
+        self.assertIn("openEditorButton.disabled = !dialogAvailable;", source)
+        self.assertIn(
+            '"Waveform editor dialog is unavailable in this ComfyUI frontend"',
+            source,
+        )
+
+        self.assertIn("node.openMusicalAudioWaveformEditor = () =>", source)
+        self.assertIn("node.closeMusicalAudioWaveformEditor = () =>", source)
+        self.assertIn("node._musicalAudioWaveformEditorDialog = null;", source)
+        self.assertNotRegex(
+            source,
+            r"node\.properties[^\n]*musicalAudioWaveformEditorDialog",
+        )
+
+        dialog_call = source.split(
+            "openedHandle = openWaveformEditorDialog({",
+            1,
+        )[1].split("});", 1)[0]
+        for expected in (
+            "dialogService: waveformEditorDialogService()",
+            "nodeId: node.id",
+            "sourceLabel: waveformEditorSourceLabel()",
+            "onClose: () =>",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, dialog_call)
+        for forbidden in ("audioEl", "audioTransport", "waveformLoader", "waveformState"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, dialog_call)
+
+        on_removed = source.split(
+            "nodeType.prototype.onRemoved = function () {",
+            1,
+        )[1].split("nodeType.prototype.onConfigure", 1)[0]
+        self.assertIn("this.closeMusicalAudioWaveformEditor();", on_removed)
+        self.assertLess(
+            on_removed.index("this.closeMusicalAudioWaveformEditor();"),
+            on_removed.index("this.destroyMusicalAudioWaveformRenderer();"),
+        )
+
+        for forbidden in (
+            "../../scripts/app.js",
+            "../../scripts/api.js",
+            "from \"vue\"",
+            "from 'vue'",
+            "createApp",
+            "useDialogStore",
+            "dialogStack",
+            "GlobalDialog",
+            "ComfyDialog",
+            "innerHTML",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, dialog_source)
+        self.assertNotIn("setDirtyCanvas", dialog_source)
+        self.assertNotIn("audioEl", dialog_source)
+        self.assertNotIn("audioTransport", dialog_source)
+        self.assertNotIn("waveformRenderer", dialog_source)
+
+    def test_waveform_editor_button_css_is_scoped_and_preserves_timeline_layers(self) -> None:
+        stylesheet = FRONTEND_STYLESHEET.read_text(encoding="utf-8")
+
+        def rule(selector: str) -> str:
+            return stylesheet.split(f"{selector} {{", 1)[1].split("}", 1)[0]
+
+        trim_header = rule(".musical-audio-ui .musical-audio-ui__trim-header")
+        trim_label = rule(".musical-audio-ui .musical-audio-ui__trim-label")
+        editor_button = rule(".musical-audio-ui .musical-audio-ui__editor-button")
+        disabled_button = rule(
+            ".musical-audio-ui .musical-audio-ui__editor-button:disabled",
+        )
+
+        for declaration in (
+            "display: flex",
+            "align-items: center",
+            "justify-content: space-between",
+            "min-width: 0",
+        ):
+            with self.subTest(declaration=declaration):
+                self.assertIn(declaration, trim_header)
+        self.assertIn("color: var(--mau-muted)", trim_label)
+        self.assertIn("font-size: 9px", trim_label)
+        self.assertIn("background: var(--mau-control-bg)", editor_button)
+        self.assertIn("border: 1px solid var(--mau-border)", editor_button)
+        self.assertIn("cursor: not-allowed", disabled_button)
+        self.assertIn(
+            ".musical-audio-ui .musical-audio-ui__editor-button:focus-visible",
+            stylesheet,
+        )
+        self.assertNotIn(".p-dialog", stylesheet)
+        self.assertNotIn(".global-dialog", stylesheet)
+
+        self.assertIn("--mau-timeline-height: 80px", stylesheet)
+        timeline_rule = rule(".musical-audio-ui .musical-audio-ui__timeline")
+        self.assertIn("height: var(--mau-timeline-height)", timeline_rule)
+        for selector, z_index in (
+            (".musical-audio-ui .musical-audio-ui__waveform", 0),
+            (".musical-audio-ui .musical-audio-ui__selection", 1),
+            (".musical-audio-ui .musical-audio-ui__playhead", 2),
+            (".musical-audio-ui .musical-audio-ui__handle", 3),
+        ):
+            with self.subTest(selector=selector):
+                self.assertIn(f"z-index: {z_index}", rule(selector))
 
     def test_frontend_maps_local_controls_to_backend_inputs_without_socket_creation(self) -> None:
         source = FRONTEND_SOURCE.read_text(encoding="utf-8")

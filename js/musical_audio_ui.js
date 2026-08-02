@@ -35,6 +35,10 @@ import {
     clearWaveformCanvas,
     renderWaveformCanvas,
 } from "./waveform_renderer.js";
+import {
+    isExtensionDialogAvailable,
+    openWaveformEditorDialog,
+} from "./waveform_editor_dialog.js";
 
 const HIDDEN_WIDGETS = [
     "audioUI",
@@ -399,6 +403,9 @@ app.registerExtension({
         nodeType.prototype.onRemoved = function () {
             this._musicalAudioRemoved = true;
             this._musicalAudioExternalRefreshPending = false;
+            if (this.closeMusicalAudioWaveformEditor) {
+                this.closeMusicalAudioWaveformEditor();
+            }
             if (this.destroyMusicalAudioWaveformRenderer) {
                 this.destroyMusicalAudioWaveformRenderer();
             }
@@ -463,6 +470,43 @@ app.registerExtension({
             node._initializingMusicalAudio = true;
             node._shouldResetSecondsTrim = false;
             node._musicalAudioRemoved = false;
+            node._musicalAudioWaveformEditorDialog = null;
+
+            const waveformEditorDialogService = () => app.extensionManager?.dialog ?? null;
+            const waveformEditorSourceLabel = () => {
+                const value = node.widgets?.find(
+                    (candidate) => candidate.name === "audio",
+                )?.value;
+                const normalized = value == null ? "" : String(value).trim();
+                return normalized && normalized.toLowerCase() !== "none"
+                    ? normalized
+                    : "No audio selected";
+            };
+            node.openMusicalAudioWaveformEditor = () => {
+                if (node._musicalAudioRemoved) return null;
+                const existingHandle = node._musicalAudioWaveformEditorDialog;
+                let openedHandle = null;
+                openedHandle = openWaveformEditorDialog({
+                    dialogService: waveformEditorDialogService(),
+                    nodeId: node.id,
+                    sourceLabel: waveformEditorSourceLabel(),
+                    onClose: () => {
+                        if (node._musicalAudioWaveformEditorDialog === openedHandle) {
+                            node._musicalAudioWaveformEditorDialog = null;
+                        }
+                    },
+                });
+                if (!openedHandle) return null;
+                if (existingHandle) return existingHandle;
+                node._musicalAudioWaveformEditorDialog = openedHandle;
+                return openedHandle;
+            };
+            node.closeMusicalAudioWaveformEditor = () => {
+                const activeHandle = node._musicalAudioWaveformEditorDialog;
+                if (!activeHandle) return;
+                node._musicalAudioWaveformEditorDialog = null;
+                activeHandle.close();
+            };
 
             const waveformLoader = createWaveformPeakLoader({
                 fetchResponse: (path, requestOptions) => api.fetchApi(path, requestOptions),
@@ -805,6 +849,32 @@ app.registerExtension({
 
             // 5 and 6. Ruler and selection timeline in one shared horizontal viewport.
             const trimArea = makeElement("div", "musical-audio-ui__trim-area");
+            const trimHeader = makeElement("div", "musical-audio-ui__trim-header");
+            const trimLabel = makeElement(
+                "span",
+                "musical-audio-ui__trim-label",
+                "Waveform",
+            );
+            const openEditorButton = makeElement(
+                "button",
+                "musical-audio-ui__editor-button",
+                "Open",
+            );
+            openEditorButton.type = "button";
+            openEditorButton.setAttribute("aria-label", "Open waveform editor");
+            const dialogAvailable = isExtensionDialogAvailable(
+                waveformEditorDialogService(),
+            );
+            openEditorButton.disabled = !dialogAvailable;
+            openEditorButton.title = dialogAvailable
+                ? "Open waveform editor"
+                : "Waveform editor dialog is unavailable in this ComfyUI frontend";
+            openEditorButton.addEventListener("click", (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                node.openMusicalAudioWaveformEditor();
+            });
+            trimHeader.append(trimLabel, openEditorButton);
             const timelineViewport = makeElement(
                 "div",
                 "musical-audio-ui__timeline-viewport",
@@ -836,7 +906,7 @@ app.registerExtension({
             sliderBox.append(startHandle, endHandle);
             timelineContent.appendChild(sliderBox);
             timelineViewport.appendChild(timelineContent);
-            trimArea.appendChild(timelineViewport);
+            trimArea.append(trimHeader, timelineViewport);
             container.appendChild(trimArea);
 
             // 7. Compact position/status line.
