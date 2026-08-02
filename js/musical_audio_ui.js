@@ -28,6 +28,8 @@ import {
     isIntermediateDecimalText,
     parseLocalizedDecimal,
 } from "./numeric_input.js";
+import { createAudioTransport } from "./audio_transport.js";
+import { createPlayheadController } from "./playhead.js";
 import { createWaveformPeakLoader } from "./waveform_loader.js";
 import {
     clearWaveformCanvas,
@@ -406,6 +408,9 @@ app.registerExtension({
             if (this.destroyMusicalAudioMetronome) {
                 this.destroyMusicalAudioMetronome();
             }
+            if (this.destroyMusicalAudioTransport) {
+                this.destroyMusicalAudioTransport();
+            }
             if (this.cancelMusicalAudioResizeHeightSync) {
                 this.cancelMusicalAudioResizeHeightSync();
             }
@@ -560,6 +565,17 @@ app.registerExtension({
             const audioEl = document.createElement("audio");
             audioEl.controls = true;
             audioEl.className = "musical-audio-ui__player-element";
+            const audioTransport = createAudioTransport(audioEl);
+            node._musicalAudioTransport = audioTransport;
+            node.getMusicalAudioTransport = () => node._musicalAudioTransport ?? null;
+            node.destroyMusicalAudioTransport = () => {
+                const currentTransport = node._musicalAudioTransport;
+                if (!currentTransport) return;
+                currentTransport.destroy();
+                if (node._musicalAudioTransport === currentTransport) {
+                    node._musicalAudioTransport = null;
+                }
+            };
             playerWrapper.appendChild(audioEl);
             container.appendChild(playerWrapper);
 
@@ -804,7 +820,10 @@ app.registerExtension({
             const waveformCanvas = makeElement("canvas", "musical-audio-ui__waveform");
             waveformCanvas.setAttribute("aria-hidden", "true");
             const fill = makeElement("div", "musical-audio-ui__selection");
+            const playhead = makeElement("div", "musical-audio-ui__playhead");
+            playhead.setAttribute("aria-hidden", "true");
             sliderBox.append(waveformCanvas, fill);
+            sliderBox.append(playhead);
 
             const startHandle = makeElement(
                 "div",
@@ -883,9 +902,24 @@ app.registerExtension({
                 animationFrameId: null,
                 canvas: waveformCanvas,
                 destroyed: false,
+                playheadAnimationFrameId: null,
+                playheadController: null,
                 resizeObserver: null,
             };
             node._musicalAudioWaveformRenderer = waveformRenderer;
+            waveformRenderer.playheadController = createPlayheadController({
+                element: playhead,
+                transport: audioTransport,
+                runtime: waveformRenderer,
+                requestFrame: requestAnimationFrame,
+                cancelFrame: cancelAnimationFrame,
+            });
+            node.refreshMusicalAudioPlayhead = () => (
+                node._musicalAudioWaveformRenderer?.playheadController?.render() ?? null
+            );
+            node.clearMusicalAudioPlayhead = () => {
+                node._musicalAudioWaveformRenderer?.playheadController?.clear();
+            };
             node.renderMusicalAudioWaveform = () => {
                 const runtime = node._musicalAudioWaveformRenderer;
                 if (!runtime || runtime.destroyed || !runtime.canvas) return null;
@@ -927,6 +961,8 @@ app.registerExtension({
             node.destroyMusicalAudioWaveformRenderer = () => {
                 const runtime = node._musicalAudioWaveformRenderer;
                 if (!runtime || runtime.destroyed) return;
+                runtime.playheadController?.destroy();
+                runtime.playheadController = null;
                 runtime.destroyed = true;
                 if (runtime.animationFrameId !== null) {
                     cancelAnimationFrame(runtime.animationFrameId);
@@ -1701,7 +1737,7 @@ app.registerExtension({
 
                 const seekToSelectionStart = (state) => {
                     if (audioEl.readyState >= 1 && audioDuration > 0) {
-                        audioEl.currentTime = clamp(state.start, 0, audioDuration);
+                        audioTransport.seek(clamp(state.start, 0, audioDuration));
                     }
                 };
 
@@ -1727,6 +1763,7 @@ app.registerExtension({
                     ) {
                         waveformLoader.clear();
                         stopMusicalAudioMetronome();
+                        node.clearMusicalAudioPlayhead();
                         playerTitle.textContent = "No audio selected";
                         audioDuration = 0;
                         audioEl.removeAttribute("src");
@@ -1750,6 +1787,7 @@ app.registerExtension({
                     );
                     if (audioEl.src !== source) {
                         stopMusicalAudioMetronome();
+                        node.clearMusicalAudioPlayhead();
                         audioEl.src = source;
                     }
                 };
@@ -2247,6 +2285,7 @@ app.registerExtension({
                 });
                 audioEl.addEventListener("error", () => {
                     stopMusicalAudioMetronome();
+                    node.clearMusicalAudioPlayhead();
                     audioDuration = 0;
                     lastRulerKey = "";
                     refreshUI(false, false);
@@ -2256,7 +2295,7 @@ app.registerExtension({
                     const state = resolveSelection();
                     if (audioEl.currentTime >= state.end) {
                         audioEl.pause();
-                        audioEl.currentTime = state.start;
+                        audioTransport.seek(state.start);
                     }
                 });
                 audioEl.addEventListener("play", () => {
@@ -2265,7 +2304,7 @@ app.registerExtension({
                         audioEl.pause();
                         seekToSelectionStart(state);
                     } else if (audioEl.currentTime < state.start || audioEl.currentTime >= state.end) {
-                        audioEl.currentTime = state.start;
+                        audioTransport.seek(state.start);
                     }
                     void reconcileMusicalAudioMetronome({ allowContextCreation: true });
                 });

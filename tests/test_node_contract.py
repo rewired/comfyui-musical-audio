@@ -1,6 +1,7 @@
 """Static MusicalLoadAudioUI contract checks without ComfyUI dependencies."""
 
 import ast
+import hashlib
 from pathlib import Path
 import re
 import unittest
@@ -12,6 +13,8 @@ INIT_SOURCE = REPO_ROOT / "__init__.py"
 SCORE_SUBSYSTEM = REPO_ROOT / "SCORE_SUBSYSTEM.md"
 FRONTEND_SOURCE = REPO_ROOT / "js" / "musical_audio_ui.js"
 FRONTEND_STYLESHEET = REPO_ROOT / "js" / "musical_audio_ui.css"
+AUDIO_TRANSPORT_SOURCE = REPO_ROOT / "js" / "audio_transport.js"
+PLAYHEAD_SOURCE = REPO_ROOT / "js" / "playhead.js"
 
 EXPECTED_WIDGETS = (
     "audio",
@@ -392,6 +395,10 @@ class StaticNodeContractTests(unittest.TestCase):
     def test_frozen_score_document_preserves_core_markers(self) -> None:
         self.assertTrue(SCORE_SUBSYSTEM.is_file())
         source = SCORE_SUBSYSTEM.read_text(encoding="utf-8")
+        self.assertEqual(
+            hashlib.sha256(SCORE_SUBSYSTEM.read_bytes()).hexdigest().upper(),
+            "9539B0E9149D45A806C54765835C4F759E96125C470B094CE72FF0FF8E6A036B",
+        )
 
         for marker in (
             "Status: Architecture frozen for implementation",
@@ -421,6 +428,171 @@ class StaticNodeContractTests(unittest.TestCase):
 
         self.assertNotIn("ScoreSource", source)
         self.assertNotIn("score_source", source)
+
+    def test_audio_transport_is_node_local_and_owns_programmatic_seeking(self) -> None:
+        source = FRONTEND_SOURCE.read_text(encoding="utf-8")
+        transport_source = AUDIO_TRANSPORT_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn(
+            'import { createAudioTransport } from "./audio_transport.js";',
+            source,
+        )
+        self.assertEqual(source.count('document.createElement("audio")'), 1)
+        self.assertIn("const audioTransport = createAudioTransport(audioEl);", source)
+        self.assertIn("node._musicalAudioTransport = audioTransport;", source)
+        self.assertIn("node.getMusicalAudioTransport = () =>", source)
+        self.assertIn("node.destroyMusicalAudioTransport = () =>", source)
+        for raw_property in (
+            "node.audioEl",
+            "node._audioEl",
+            "node.audioElement",
+            "node._musicalAudioElement",
+        ):
+            with self.subTest(raw_property=raw_property):
+                self.assertNotIn(raw_property, source)
+
+        self.assertIsNone(re.search(r"audioEl\.currentTime\s*=", source))
+        self.assertGreaterEqual(source.count("audioTransport.seek("), 3)
+        seek_helper = source.split("const seekToSelectionStart = (state) => {", 1)[1].split(
+            "const refreshUI",
+            1,
+        )[0]
+        timeupdate = source.split('audioEl.addEventListener("timeupdate", () => {', 1)[1].split(
+            'audioEl.addEventListener("play"',
+            1,
+        )[0]
+        play_handler = source.split('audioEl.addEventListener("play", () => {', 1)[1].split(
+            'audioEl.addEventListener("pause"',
+            1,
+        )[0]
+        self.assertIn("audioTransport.seek(", seek_helper)
+        self.assertIn("audioTransport.seek(state.start)", timeupdate)
+        self.assertIn("audioTransport.seek(state.start)", play_handler)
+
+        on_removed = source.split("nodeType.prototype.onRemoved = function () {", 1)[1].split(
+            "nodeType.prototype.onConfigure",
+            1,
+        )[0]
+        cleanup_calls = (
+            "destroyMusicalAudioWaveformRenderer",
+            "destroyMusicalAudioWaveformData",
+            "destroyMusicalAudioMetronome",
+            "destroyMusicalAudioTransport",
+            "cancelMusicalAudioResizeHeightSync",
+            "clearMusicalAudioSyncFeedback",
+        )
+        self.assertEqual(
+            sorted(on_removed.index(call) for call in cleanup_calls),
+            [on_removed.index(call) for call in cleanup_calls],
+        )
+
+        for forbidden_dependency in (
+            "../../scripts/app.js",
+            "../../scripts/api.js",
+            "waveform_",
+            "metronome",
+            "Vue",
+            "document.",
+            "fetch(",
+            "localStorage",
+            "console.",
+        ):
+            with self.subTest(forbidden_dependency=forbidden_dependency):
+                self.assertNotIn(forbidden_dependency, transport_source)
+
+    def test_inline_playhead_dom_runtime_and_cleanup_are_isolated(self) -> None:
+        source = FRONTEND_SOURCE.read_text(encoding="utf-8")
+        playhead_source = PLAYHEAD_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn(
+            'import { createPlayheadController } from "./playhead.js";',
+            source,
+        )
+        creation = 'const playhead = makeElement("div", "musical-audio-ui__playhead");'
+        self.assertEqual(source.count(creation), 1)
+        playhead_dom = source.split(creation, 1)[1].split("timelineContent.appendChild", 1)[0]
+        self.assertIn('playhead.setAttribute("aria-hidden", "true")', playhead_dom)
+        self.assertNotIn("tabIndex", playhead_dom)
+        self.assertIn("sliderBox.append(waveformCanvas, fill);", playhead_dom)
+        self.assertIn("sliderBox.append(playhead);", playhead_dom)
+        self.assertLess(
+            playhead_dom.index("sliderBox.append(playhead);"),
+            playhead_dom.index("startHandle"),
+        )
+        self.assertLess(
+            playhead_dom.index("sliderBox.append(playhead);"),
+            playhead_dom.index("endHandle"),
+        )
+        self.assertNotIn("playhead.addEventListener", source)
+
+        self.assertIn("playheadAnimationFrameId: null", source)
+        self.assertIn("runtime: waveformRenderer", source)
+        self.assertIn("node.refreshMusicalAudioPlayhead = () =>", source)
+        self.assertIn("node.clearMusicalAudioPlayhead = () =>", source)
+        renderer_cleanup = source.split(
+            "node.destroyMusicalAudioWaveformRenderer = () => {",
+            1,
+        )[1].split("if (typeof ResizeObserver", 1)[0]
+        self.assertLess(
+            renderer_cleanup.index("runtime.playheadController?.destroy()"),
+            renderer_cleanup.index("runtime.canvas.width = 0"),
+        )
+        self.assertIn("node.clearMusicalAudioPlayhead();", source)
+
+        for forbidden_operation in (
+            "scheduleMusicalAudioWaveformRender",
+            "renderMusicalAudioWaveform",
+            "setDirtyCanvas",
+            "setInterval",
+            "setTimeout",
+            "addEventListener",
+            "wheel",
+            "click",
+            "TimeAxis",
+            "Vue",
+        ):
+            with self.subTest(forbidden_operation=forbidden_operation):
+                self.assertNotIn(forbidden_operation, playhead_source)
+
+    def test_playhead_css_preserves_timeline_geometry_and_layer_order(self) -> None:
+        stylesheet = FRONTEND_STYLESHEET.read_text(encoding="utf-8")
+
+        def rule(selector: str) -> str:
+            return stylesheet.split(f"{selector} {{", 1)[1].split("}", 1)[0]
+
+        waveform_rule = rule(".musical-audio-ui .musical-audio-ui__waveform")
+        selection_rule = rule(".musical-audio-ui .musical-audio-ui__selection")
+        playhead_rule = rule(".musical-audio-ui .musical-audio-ui__playhead")
+        visible_rule = rule(
+            ".musical-audio-ui .musical-audio-ui__playhead.is-visible",
+        )
+        handle_rule = rule(".musical-audio-ui .musical-audio-ui__handle")
+
+        self.assertIn("z-index: 0", waveform_rule)
+        self.assertIn("z-index: 1", selection_rule)
+        self.assertIn("z-index: 2", playhead_rule)
+        self.assertIn("z-index: 3", handle_rule)
+        for declaration in (
+            "position: absolute",
+            "top: 0",
+            "bottom: 0",
+            "left: var(--mau-playhead-position)",
+            "width: 2px",
+            "background: #f3f4f6",
+            "transform: translateX(-50%)",
+            "pointer-events: none",
+            "user-select: none",
+            "visibility: hidden",
+            "opacity: 0",
+        ):
+            with self.subTest(declaration=declaration):
+                self.assertIn(declaration, playhead_rule)
+        self.assertNotIn("transition", playhead_rule)
+        self.assertIn("visibility: visible", visible_rule)
+        self.assertIn("opacity: 0.95", visible_rule)
+        self.assertIn("--mau-timeline-height: 80px", stylesheet)
+        timeline_rule = rule(".musical-audio-ui .musical-audio-ui__timeline")
+        self.assertIn("height: var(--mau-timeline-height)", timeline_rule)
 
     def test_frontend_maps_local_controls_to_backend_inputs_without_socket_creation(self) -> None:
         source = FRONTEND_SOURCE.read_text(encoding="utf-8")

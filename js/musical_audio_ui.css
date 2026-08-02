@@ -730,9 +730,44 @@
     transform: translateX(-2px);
 }
 
-.musical-audio-ui .musical-audio-ui__handle {
+.musical-audio-ui .musical-audio-ui__playhead {
     position: absolute;
     z-index: 2;
+    top: 0;
+    bottom: 0;
+    left: var(--mau-playhead-position);
+    width: 2px;
+    background: #f3f4f6;
+    box-shadow: 0 0 4px rgba(0, 0, 0, 0.85);
+    opacity: 0;
+    visibility: hidden;
+    transform: translateX(-50%);
+    pointer-events: none;
+    user-select: none;
+}
+
+.musical-audio-ui .musical-audio-ui__playhead::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 50%;
+    width: 7px;
+    height: 7px;
+    background: #f3f4f6;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+    transform: translateX(-50%);
+    pointer-events: none;
+}
+
+.musical-audio-ui .musical-audio-ui__playhead.is-visible {
+    opacity: 0.95;
+    visibility: visible;
+}
+
+.musical-audio-ui .musical-audio-ui__handle {
+    position: absolute;
+    /* z-index: 2 is reserved for the playhead layer. */
+    z-index: 3;
     top: 0;
     left: var(--mau-handle-position);
     width: 8px;
