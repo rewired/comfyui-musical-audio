@@ -501,27 +501,35 @@ def test_non_builtin_arrays_and_nested_objects_are_rejected():
 def test_serializer_imports_are_acyclic_and_production_is_io_free():
     path = ROOT / "score" / "serialize.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
-    imports = set()
+    direct_imports = set()
+    sibling_imports = {}
+    absolute_score_imports = []
     calls = []
     score_calls = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            imports.update(alias.name for alias in node.names)
+            direct_imports.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
-            imports.add(node.module or "")
+            if node.level == 1:
+                sibling_imports[(node.level, node.module)] = tuple(
+                    alias.name for alias in node.names
+                )
+            else:
+                direct_imports.add(node.module or "")
+                if node.module is not None and node.module.startswith("score."):
+                    absolute_score_imports.append(node.module)
         elif isinstance(node, ast.Call):
             name = node.func.id if isinstance(node.func, ast.Name) else node.func.attr if isinstance(node.func, ast.Attribute) else ""
             calls.append(name)
             if name == "Score":
                 score_calls.append(node.lineno)
-    assert imports == {
-        "dataclasses",
-        "math",
-        "score.bars",
-        "score.model",
-        "score.normalize",
+    assert direct_imports == {"dataclasses", "math"}
+    assert sibling_imports == {
+        (1, "bars"): ("build_bar_grid",),
+        (1, "model"): ("Marker", "MeterEvent", "Score", "Section", "TempoEvent"),
+        (1, "normalize"): ("finalize_score", "normalize_events"),
     }
-    assert "score.midi_parse" not in imports
+    assert absolute_score_imports == []
     assert not {"open", "print", "read_bytes", "write_bytes", "getenv", "putenv"} & set(calls)
     assert score_calls == []
 

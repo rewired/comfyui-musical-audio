@@ -1,7 +1,7 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from score.model import MeterEvent
+from .model import MeterEvent
 
 
 @dataclass(frozen=True)

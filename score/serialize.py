@@ -1,9 +1,9 @@
 from dataclasses import dataclass
 import math
 
-from score.bars import build_bar_grid
-from score.model import Marker, MeterEvent, Score, Section, TempoEvent
-from score.normalize import finalize_score, normalize_events
+from .bars import build_bar_grid
+from .model import Marker, MeterEvent, Score, Section, TempoEvent
+from .normalize import finalize_score, normalize_events
 
 
 SCORE_SCHEMA_VERSION = 1

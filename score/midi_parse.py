@@ -1,8 +1,8 @@
 from dataclasses import dataclass
 
-from score.bars import build_bar_grid
-from score.model import Marker, Score
-from score.normalize import (
+from .bars import build_bar_grid
+from .model import Marker, Score
+from .normalize import (
     OrderedMeterEvent,
     OrderedTempoEvent,
     derive_sections,

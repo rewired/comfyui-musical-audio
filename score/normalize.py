@@ -1,8 +1,8 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from score.bars import BarGrid
-from score.model import (
+from .bars import BarGrid
+from .model import (
     Marker,
     MeterEvent,
     Score,
