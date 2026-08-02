@@ -3,8 +3,8 @@
 This document defines the musical timing semantics used by
 `MusicalLoadAudioUI`. Specification version 0.2 defines two timing profiles:
 `ConstantTempoMap` and `ScoreTempoMap`. `ConstantTempoMap` preserves the
-currently implemented constant-tempo behavior. `ScoreTempoMap` is specified
-normatively for upcoming implementation work.
+implemented constant-tempo behavior. `ScoreTempoMap` defines both the
+delivered resolver surface and the complete TempoMap planning profile.
 
 The [Score Subsystem: Tempo Map and Markers](SCORE_SUBSYSTEM.md) is the frozen
 architecture contract for Score data and resolution. Audio decoding, trimming,
@@ -16,12 +16,15 @@ remain governed by the
 
 Specification version: 0.2
 
-The currently implemented runtime profile is `ConstantTempoMap`, which
-preserves the version 0.1 constant-tempo behavior.
+The Score model, provider resolution, `ScoreResolver`, and the complete
+`ScoreTempoMap` query surface are implemented. The delivered node can activate
+only the smaller uniform-timing bridge and keeps unsupported Score shapes
+display-only. The complete TempoMap planning profile specified below is not
+yet implemented in the node.
 
-The `ScoreTempoMap`, Score model, and provider-resolution sections are
-normative contracts for upcoming implementation phases. Their presence in this
-specification does not claim that those runtime features are already available.
+This implementation-status paragraph is descriptive. It does not narrow the
+normative complete-planning rules or make the delivered uniform bridge the
+definition of complete Score timing.
 
 Audio trimming remains sample-based and is governed by the
 [Audio Integration Contract](AUDIO_INTEGRATION_SPEC.md). Video-frame values are
@@ -548,6 +551,206 @@ documented nonnegative arithmetic overflow behavior. Canonical Score-position
 APIs use canonical ranges instead. This distinction must not be used to change
 the compatibility profile's accepted inputs.
 
+## Complete Score selection
+
+This section defines the request contract whenever the complete TempoMap
+planning profile owns a resolved Score selection. It is independent of any
+implementation roadmap or delivery step.
+
+### Exact exclusive end position
+
+A complete Score request has these three internal fields in addition to its
+canonical start position:
+
+```text
+score_end_bar
+score_end_beat
+score_end_subdivision
+```
+
+They describe the exclusive musical end position. Their one canonical unset
+value is exactly:
+
+```text
+score_end_bar         = 0
+score_end_beat        = 0
+score_end_subdivision = 0
+```
+
+Bar zero is outside the canonical 1-based Score domain and therefore cannot
+collide with a valid position. The unset state is all-or-nothing. A zero end
+bar with a nonzero beat or subdivision, a positive end bar with an end beat
+below one, or any other incomplete sentinel combination is invalid.
+
+An exact end is present only when `score_end_bar` is positive and all three
+fields form one canonical Score position under the active
+`subdivisions_per_beat` grid. Invalid exact-end fields are not normalized,
+clamped, or replaced with legacy duration values.
+
+When present, the exact end has priority over `duration_bars`,
+`duration_beats`, and `duration_subdivisions`:
+
+```text
+start_tick = position_to_tick(
+    start_bar,
+    start_beat,
+    start_subdivision,
+    subdivisions_per_beat,
+)
+
+end_tick_exclusive = position_to_tick(
+    score_end_bar,
+    score_end_beat,
+    score_end_subdivision,
+    subdivisions_per_beat,
+)
+```
+
+This exact-position path supports every valid Score shape: one or multiple
+tempo events, constant or changing meter, meter changes inside a bar, and
+unusual meters. Both boundaries are canonical ticks; tempo conversion happens
+only after the range is valid.
+
+### Meter-stable duration fallback
+
+When the exact end is canonically unset, the nonnegative legacy duration
+quantities may determine `end_tick_exclusive` only when the requested
+half-open interval is meter-stable. This rule is independent of
+`ScoreTempoMap.supports_uniform_timing`. That bridge predicate also requires
+exactly one tempo event and is intentionally narrower than the question of
+whether a duration request is unambiguous.
+
+Resolve the fallback in this order:
+
+1. Resolve the canonical requested start position to `start_tick`.
+2. Obtain the effective meter signature `(numerator, denominator)` at that
+   start.
+3. Interpret `duration_bars`, `duration_beats`, and
+   `duration_subdivisions` as nonnegative quantities under that meter. They
+   retain their arithmetic overflow behavior.
+4. Combine the canonical start's subdivision index within its bar with the
+   complete duration quantity. Resolve the resulting provisional end from the
+   canonical start-bar and containing-beat anchors with the absolute
+   round-half-away-from-zero grid rule; do not accumulate rounded beat or
+   subdivision widths. The result is `candidate_end_tick`.
+5. Verify that the effective meter signature remains unchanged throughout
+   `[start_tick, candidate_end_tick)`.
+6. Only after that verification set
+   `end_tick_exclusive = candidate_end_tick`.
+7. Convert the accepted start and exclusive-end ticks to seconds through the
+   complete piecewise tempo map.
+
+The tick-domain quantity in step 4 has the same linear overflow meaning as the
+legacy duration fields under the meter effective at the start. Let
+`start_bar_tick` be the exact canonical start of `start_bar`:
+
+```text
+duration_subdivision_count =
+    (duration_bars * numerator + duration_beats)
+    * subdivisions_per_beat
+    + duration_subdivisions
+
+provisional_end_subdivision_index =
+    ((start_beat - 1) * subdivisions_per_beat + start_subdivision)
+    + duration_subdivision_count
+
+provisional_end_beat_index, provisional_end_subdivision =
+    divmod(provisional_end_subdivision_index, subdivisions_per_beat)
+
+candidate_end_tick =
+    start_bar_tick
+    + round_half_away_from_zero(
+        provisional_end_beat_index
+        * ticks_per_quarter * 4
+        / denominator
+    )
+    + round_half_away_from_zero(
+        provisional_end_subdivision
+        * ticks_per_quarter * 4
+        / (denominator * subdivisions_per_beat)
+    )
+```
+
+The provisional beat index may overflow the nominal bar; that is the defined
+quantity behavior. Each rounded boundary is calculated absolutely from its
+canonical bar or beat anchor, never by repeated addition of a rounded width.
+
+Any number of tempo changes may occur inside a meter-stable interval. Tempo
+changes never make bar-count duration ambiguous, and accepted tick boundaries
+are converted to seconds by integrating every intersected tempo segment. The
+calculation must not use one global `seconds_per_beat` or
+`seconds_per_bar`.
+
+A meter change strictly before `candidate_end_tick` makes the duration
+fallback invalid and requires an exact end position. A meter change exactly at
+`candidate_end_tick` is outside the half-open interval and is allowed. A
+zero-length interval is valid and meter-stable. A Score that is variable in
+general may therefore use this fallback when the requested interval lies
+wholly within one meter-stable region.
+
+This fallback validates one request; it is not a Score activation test. Under
+the complete TempoMap planning profile, a resolved Score remains the timing
+authority whether the request uses an exact end or the meter-stable duration
+fallback. A duration request that crosses a meter change without an exact end
+is a fatal request error and must not select `ConstantTempoMap`.
+
+### Complete Score timing authority
+
+When the complete TempoMap planning profile is active, every valid resolved
+Score is the timing authority for both uniform and nonuniform tempo and meter
+shapes. Score shape must not cause a `ConstantTempoMap` fallback, mixed
+Score/constant planning, display-only timing, or partial Score activation.
+
+A concrete request can still be invalid because it lacks enough information
+to identify an unambiguous range. That is a request error, not deactivation of
+the Score. The delivered node's smaller uniform bridge is an implementation
+limitation described in Status; it is not this complete-planning contract.
+
+### Range validation and fatal diagnostics
+
+The requested Score interval is half-open. These range relations are exact:
+
+```text
+end_tick_exclusive == start_tick  -> valid empty requested interval
+end_tick_exclusive <  start_tick  -> invalid requested interval
+```
+
+The audio integration layer may apply its existing non-empty returned-audio
+rule after accepting an empty requested interval. It must not reinterpret an
+end before the start.
+
+Complete Score selection adds these diagnostic codes without changing the
+existing provider and uniform-bridge diagnostic codes:
+
+```text
+score_end_position_required
+score_selection_range_invalid
+```
+
+Both have severity `error`.
+
+`score_end_position_required` applies when no exact end is present and the
+duration fallback would cross a meter change within the requested half-open
+interval.
+
+`score_selection_range_invalid` applies to a mixed or malformed unset/end
+state, a noncanonical exact end, an invalid bar, beat, subdivision, or grid,
+an end before the start, or another structurally invalid exact Score range.
+
+Either error terminates node execution deterministically:
+
+- Raise `ValueError`.
+- The exception text is compact diagnostic JSON.
+- The JSON is an array containing exactly one entry.
+- The entry keys are inserted in the order `code`, `severity`, `message`.
+- Do not call the clip planner.
+- Do not slice a waveform or return node outputs.
+- Do not fall back to `ConstantTempoMap`.
+- Do not substitute the one-second silence fallback.
+
+The one-second silence fallback remains exclusively an audio-availability and
+decode-recovery behavior under the Audio Integration Contract.
+
 ## Score data contract
 
 The Score contract separates canonical musical data from the provider that
@@ -642,8 +845,9 @@ exports.
 ## ScoreTempoMap semantics
 
 `ScoreTempoMap` resolves the canonical Score event lists into the shared
-`TempoMap` contract. This section is normative but is not a claim of current
-runtime availability.
+`TempoMap` contract. This section defines the delivered resolver mathematics;
+the Status section separately identifies which planning profile the node
+currently activates.
 
 ### Effective events and defaults
 
@@ -742,19 +946,17 @@ Section display bar values are derived through the resolver. The timing model
 does not store a potentially misleading bar count on a Section that begins or
 ends inside a bar.
 
-### Variable-meter feature gate
+### Delivered uniform-bridge limitation
 
-Variable-meter and mid-bar-meter Scores remain display-only until the
-functional variable-meter integration is complete.
+The delivered node currently activates Score timing only through the smaller
+uniform bridge. Its runtime gate requires constant, bar-aligned meter and one
+tempo event; Scores outside that gate remain display-only in the delivered
+implementation. There is no partially active path within that bridge.
 
-There is no partially active Score mode.
-
-A Score is either fully active for the supported editing operations or is
-explicitly display-only under the feature gate.
-
-This is a runtime activation constraint. It does not weaken the normative
-`ScoreTempoMap` mathematics. The presence of parsed variable-meter data does
-not by itself activate editing based on that data.
+This subsection records implementation status rather than a normative limit
+on complete `ScoreTempoMap` mathematics. Under the complete TempoMap planning
+profile, the Complete Score selection rules apply instead: a valid resolved
+Score remains the sole timing authority for every valid tempo and meter shape.
 
 ## Provider resolution
 
@@ -867,25 +1069,27 @@ corpus without introducing a property-testing dependency.
 
 ## Current implementation state and exclusions
 
-The current runtime implements the `ConstantTempoMap` compatibility profile.
-It does not yet provide the normative `Score` model, `ResolvedScore`, provider
-chain, `ScoreTempoMap`, variable-meter resolution, Score Sections, or the
-cross-language Score resolver described above.
+The current runtime implements the `ConstantTempoMap` compatibility profile,
+the Score model and serialization core, MIDI parsing, provider resolution,
+`ScoreResolver`, `ScoreTempoMap`, Score Sections, and uniform Score routing
+through the audio node. The node currently uses the smaller uniform bridge;
+complete nonuniform Score selection and start-anchored local timing metrics
+described above are not yet implemented.
 
 The current runtime also does not include:
 
 - automatic BPM detection
 - automatic downbeat detection
-- tempo-map loading
-- changing time signatures
+- complete nonuniform Score planning in the audio node
+- frontend editing against changing or inside-bar meter
 - swing timing
 - tuplets beyond equal subdivisions
 - external music-analysis dependencies
 
 These are statements about current implementation availability, not removals
-from the version 0.2 normative contract. In particular, `ScoreTempoMap`, Score
-data, and provider resolution remain specified here so later implementations
-can be evaluated against a stable contract.
+from the version 0.2 normative contract. The complete TempoMap planning
+profile remains specified here so its implementation can be evaluated against
+one stable contract.
 
 This specification does not define audio decoding, waveform clamping, source
 sample selection, or node output compatibility. Those remain under the
