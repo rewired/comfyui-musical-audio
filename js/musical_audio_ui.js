@@ -28,6 +28,7 @@ import {
     isIntermediateDecimalText,
     parseLocalizedDecimal,
 } from "./numeric_input.js";
+import { createWaveformPeakLoader } from "./waveform_loader.js";
 
 const HIDDEN_WIDGETS = [
     "audioUI",
@@ -392,6 +393,9 @@ app.registerExtension({
         nodeType.prototype.onRemoved = function () {
             this._musicalAudioRemoved = true;
             this._musicalAudioExternalRefreshPending = false;
+            if (this.destroyMusicalAudioWaveformData) {
+                this.destroyMusicalAudioWaveformData();
+            }
             if (this.destroyMusicalAudioMetronome) {
                 this.destroyMusicalAudioMetronome();
             }
@@ -447,6 +451,27 @@ app.registerExtension({
             node._initializingMusicalAudio = true;
             node._shouldResetSecondsTrim = false;
             node._musicalAudioRemoved = false;
+
+            const waveformLoader = createWaveformPeakLoader({
+                fetchResponse: (path, requestOptions) => api.fetchApi(path, requestOptions),
+                onStateChange: (state) => {
+                    node._musicalAudioWaveformState = state;
+                },
+            });
+            node._musicalAudioWaveformState = waveformLoader.getState();
+            node.getMusicalAudioWaveformState = () => waveformLoader.getState();
+            node.refreshMusicalAudioWaveformData = (options = {}) => {
+                const value = node.widgets?.find(
+                    (candidate) => candidate.name === "audio",
+                )?.value;
+                const filename = value == null ? value : String(value);
+                return waveformLoader.load(filename, { force: options?.force === true });
+            };
+            node.clearMusicalAudioWaveformData = () => waveformLoader.clear();
+            node.destroyMusicalAudioWaveformData = () => {
+                waveformLoader.dispose();
+                node._musicalAudioWaveformState = waveformLoader.getState();
+            };
 
             // Prevent ComfyUI V1/V2 image-preview paths from replacing the audio UI.
             Object.defineProperty(node, "imgs", {
@@ -1612,7 +1637,15 @@ app.registerExtension({
                 };
 
                 const updateAudioSource = () => {
-                    if (!audioWidget?.value || audioWidget.value === "none") {
+                    const selectedAudioValue = audioWidget?.value;
+                    const selectedAudioFilename = selectedAudioValue == null
+                        ? ""
+                        : String(selectedAudioValue);
+                    if (
+                        selectedAudioFilename.trim() === ""
+                        || selectedAudioFilename.toLowerCase() === "none"
+                    ) {
+                        waveformLoader.clear();
                         stopMusicalAudioMetronome();
                         playerTitle.textContent = "No audio selected";
                         audioDuration = 0;
@@ -1622,7 +1655,8 @@ app.registerExtension({
                         refreshUI(false, true);
                         return;
                     }
-                    let filename = String(audioWidget.value);
+                    void waveformLoader.load(selectedAudioFilename);
+                    let filename = selectedAudioFilename;
                     let subfolder = "";
                     if (filename.includes("/") || filename.includes("\\")) {
                         const separator = filename.includes("/") ? "/" : "\\";
