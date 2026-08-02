@@ -8,13 +8,19 @@ from typing import Literal
 
 try:
     from .musical_timing import (
+        ConstantTempoMap,
+        NearestPosition,
         TempoUnit,
+        UniformTimingBridge,
         calculate_musical_timing,
         round_half_away_from_zero,
     )
 except ImportError:  # Support direct imports when running the standalone tests.
     from musical_timing import (  # type: ignore[no-redef]
+        ConstantTempoMap,
+        NearestPosition,
         TempoUnit,
+        UniformTimingBridge,
         calculate_musical_timing,
         round_half_away_from_zero,
     )
@@ -74,34 +80,34 @@ def _duration_label(
     return " + ".join(parts) if parts else "0 Beats"
 
 
-def _nearest_grid_position(
-    *,
-    start_seconds: float,
-    downbeat_offset: float,
-    seconds_per_beat: float,
-    beats_per_bar: int,
-    subdivisions_per_beat: int,
-) -> str:
-    relative_subdivisions = round_half_away_from_zero(
-        ((start_seconds - downbeat_offset) / seconds_per_beat)
-        * subdivisions_per_beat
-    )
-    if relative_subdivisions < 0:
+def _format_nearest_position(nearest: NearestPosition) -> str:
+    before = nearest.subdivisions_before_bar_one
+    if type(before) is not int:
+        raise ValueError("invalid NearestPosition before-count")
+    if before > 0:
+        if not (
+            nearest.bar is None
+            and nearest.beat is None
+            and nearest.subdivision is None
+        ):
+            raise ValueError("invalid Pre-Bar-1 NearestPosition variant")
         return (
-            f"{-relative_subdivisions} subdivisions before "
+            f"{before} subdivisions before "
             "Bar 1 · Beat 1"
         )
-
-    subdivisions_per_bar = beats_per_bar * subdivisions_per_beat
-    bar_index, subdivision_in_bar = divmod(
-        relative_subdivisions, subdivisions_per_bar
-    )
-    beat_index, subdivision = divmod(
-        subdivision_in_bar, subdivisions_per_beat
-    )
+    if (
+        before != 0
+        or type(nearest.bar) is not int
+        or nearest.bar <= 0
+        or type(nearest.beat) is not int
+        or nearest.beat <= 0
+        or type(nearest.subdivision) is not int
+        or nearest.subdivision < 0
+    ):
+        raise ValueError("invalid canonical NearestPosition variant")
     return (
-        f"Bar {bar_index + 1} · Beat {beat_index + 1} · "
-        f"Subdivision {subdivision}"
+        f"Bar {nearest.bar} · Beat {nearest.beat} · "
+        f"Subdivision {nearest.subdivision}"
     )
 
 
@@ -125,6 +131,7 @@ def create_audio_clip_plan(
     duration_beats: int = 0,
     duration_subdivisions: int = 0,
     subdivisions_per_beat: int = 4,
+    tempo_map: UniformTimingBridge | None = None,
 ) -> AudioClipPlan:
     """Create the complete sample-accurate clip plan for an edit mode."""
     if type(edit_mode) is not str:
@@ -134,6 +141,16 @@ def create_audio_clip_plan(
     _require_positive_integer("sample_rate", sample_rate)
     _require_positive_integer("sample_count", sample_count)
 
+    active_map = (
+        ConstantTempoMap(
+            bpm=bpm,
+            tempo_unit=tempo_unit,
+            beats_per_bar=beats_per_bar,
+            beat_unit=beat_unit,
+        )
+        if tempo_map is None
+        else tempo_map
+    )
     timing = calculate_musical_timing(
         bpm=bpm,
         tempo_unit=tempo_unit,
@@ -148,6 +165,7 @@ def create_audio_clip_plan(
         duration_beats=duration_beats,
         duration_subdivisions=duration_subdivisions,
         subdivisions_per_beat=subdivisions_per_beat,
+        tempo_map=active_map,
     )
     audio_duration = sample_count / sample_rate
 
@@ -212,15 +230,12 @@ def create_audio_clip_plan(
             f"Frames: {start_frame}–{frame_end}{clamp_suffix}"
         )
     else:
-        nearest = _nearest_grid_position(
-            start_seconds=start_seconds,
-            downbeat_offset=downbeat_offset,
-            seconds_per_beat=timing.seconds_per_beat,
-            beats_per_bar=beats_per_bar,
-            subdivisions_per_beat=subdivisions_per_beat,
+        nearest = active_map.describe_nearest_position(
+            start_seconds - downbeat_offset,
+            subdivisions_per_beat,
         )
         musical_position = (
-            f"Seconds mode | Nearest: {nearest} | "
+            f"Seconds mode | Nearest: {_format_nearest_position(nearest)} | "
             f"Time: {start_seconds:.3f}–{end_seconds:.3f} s | "
             f"Frames: {start_frame}–{frame_end}{clamp_suffix}"
         )
