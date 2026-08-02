@@ -1,165 +1,167 @@
-# Score-Subsystem: Tempo-Map und Marker
+# Score Subsystem: Tempo Map and Markers
 
 > **Status: Architecture frozen for implementation**
-> **Revision: 1** — Stand Repo `604e5ab`, Branch
+> **Revision: 1** — Repository state `604e5ab`, branch
 > `feature/css-theme-foundation-v0.2.0`
 >
-> S1–S10 sind Implementierungs- und Testvertrag, keine Roadmap. Änderungen
-> daran erfordern ein ausdrückliches Amendment an dieser Spezifikation, nicht
-> eine Entscheidung zur Implementierungszeit. Die Phasen und der Waveform-Strang
-> bleiben planbar und dürfen umsortiert werden.
+> S1–S10 and decisions 1–6 are an implementation and test contract, not a
+> roadmap. Changes to them require an explicit amendment to this
+> specification rather than an implementation-time decision. The phases and
+> the Waveform Editor strand
+> remain plannable and may be reordered.
 
-Architekturplan für `comfyui-musical-audio`.
+Architecture plan for `comfyui-musical-audio`.
 
-## Grundidee
+## Core idea
 
-Tempo-Map und Marker sind kein zweites Feature — sie kommen aus derselben
-MIDI-Datei, aus demselben Parse-Durchlauf, und beschreiben dasselbe Ding: was
-die DAW über die Zeitachse weiß.
+The tempo map and markers are not two separate features—they come from the
+same MIDI file, from the same parsing pass, and describe the same thing: what
+the DAW knows about the time axis.
 
-Also ein Subsystem, nicht zwei Features. Der gemeinsame Nenner heißt hier
-**Score**.
-
-```
-MIDI-Datei ──parse────┐
-Audioanalyse ─────────┼──▶ Score ──┬──▶ TempoMap    (Position ↔ Sekunden)
-BPM + Taktart ────────┘            ├──▶ MeterMap    (Tick ↔ Takt/Beat)
-                                   └──▶ Sections    (benannte Bereiche)
-```
-
-Drei Quellen, ein Datentyp. Alles hinter `Score` weiß nicht, woher die Zahlen
-kommen — und darf es auch nicht wissen müssen.
-
-Dazu quer eine zweite, unabhängige Achse: **Material**. Der Score sagt *wann*
-geschnitten wird, das Material *was* geschnitten wird. Ein Mix ist eine Spur,
-ein Stem-Satz sind fünf — an der Zeitachse ändert das nichts.
+So this is one subsystem, not two features. The common denominator here is
+called **Score**.
 
 ```
-Score      ──▶ Plan (Ticks)  ──apply──▶ Segmente
-Material   ──▶ Spuren (Samples) ───────┘
+MIDI file ─────parse────┐
+Audio analysis ─────────┼──▶ Score ──┬──▶ TempoMap    (Position ↔ seconds)
+BPM + time signature ───┘            ├──▶ MeterMap    (Tick ↔ bar/beat)
+                                     └──▶ Sections    (named regions)
+```
+
+Three sources, one data type. Everything behind `Score` neither knows where
+the numbers come from nor should need to know.
+
+Crossing that is a second, independent axis: **Material**. The Score says
+*when* to cut; the Material says *what* to cut. A mix is one track, a stem set
+is five—the time axis does not change.
+
+```
+Score      ──▶ Plan (Ticks)    ──apply──▶ Segments
+Material   ──▶ Tracks (Samples) ─────────┘
 ```
 
 ---
 
-## Die sechs Entscheidungen, die alles andere festlegen
+## The six decisions that determine everything else
 
-### 1. Ticks sind die kanonische Einheit, nicht Sekunden
+### 1. Ticks are the canonical unit, not seconds
 
-MIDI denkt in Ticks. Taktgrenzen sind dort exakte Ganzzahlen — ein 31/32-Takt
-ist präzise 1860 Ticks, kein gerundeter Float. Die Umrechnung nach Sekunden
-passiert **einmal, an der Außengrenze**.
+MIDI thinks in ticks. Bar boundaries are exact integers there—a 31/32 bar is
+precisely 1860 ticks, not a rounded float. Conversion to seconds happens
+**once, at the outer boundary**.
 
-Konsequenz: intern rechnet alles in Ticks. Erst der Output konvertiert.
+Consequence: everything operates in ticks internally. Only the output
+converts.
 
-Für die Audioanalyse dreht sich das um: die liefert *nur* Sekunden. Sie muss
-in Ticks zurückrechnen, bevor sie einen `Score` ausgeben darf — siehe
-Fallstrick „Sekunden sind keine Ticks". Das ist Aufwand auf ihrer Seite, aber
-er hält den Rest des Systems frei von Sonderfällen.
+For audio analysis, the direction is reversed: it provides *only* seconds.
+It must convert them back to ticks before it may produce a `Score`—see the
+pitfall “Seconds are not ticks.” That is work on its side, but it keeps the
+rest of the system free of special cases.
 
-### 2. Der lineare Subdivision-Index muss weg
+### 2. The linear subdivision index must go
 
-Das ist der tiefste Eingriff, und er ist unvermeidbar.
+This is the deepest intervention, and it is unavoidable.
 
-`musicalPositionToSubdivisionIndex` rechnet heute
+Today, `musicalPositionToSubdivisionIndex` calculates
 `((bar-1) * beatsPerBar + (beat-1)) * subdivisionsPerBeat + subdivision`.
-Das setzt voraus, dass `beatsPerBar` global konstant ist. Mit einer Meter-Map
-ist es eine Funktion des Taktes — die Formel wird schlicht falsch.
+That assumes `beatsPerBar` is globally constant. With a meter map, it is a
+function of the bar—the formula simply becomes wrong.
 
-Ersatz: **Position ↔ Tick ↔ Sekunden.** Der lineare Index war immer nur eine
-Bequemlichkeit für gleichmäßige Raster.
+Replacement: **Position ↔ Tick ↔ Seconds.** The linear index was always only
+a convenience for uniform grids.
 
-**Der Index existiert nur im Frontend, aber nicht nur in einer Datei.**
-`musical_timing.py` kennt ihn nicht — dort steht nur
-`calculate_musical_timing`, und die rechnet bereits über Sekunden. Python
-braucht in Entscheidung 2 also gar nichts.
+**The index exists only in the frontend, but not only in one file.**
+`musical_timing.py` does not know it—it contains only
+`calculate_musical_timing`, which already calculates through seconds. Python
+therefore needs nothing at all for decision 2.
 
-`js/musical_audio_ui.js` importiert allerdings
-`subdivisionIndexToMusicalPosition`, `subdivisionIndexToSeconds` und
-`timingGrid` direkt und baut damit **das Lineal** (Zeile 1611), die
-Zeitauflösung (1115) und die Selektionsgrenzen (1151/1152). Der Eingriff
-liegt damit in `js/musical_grid.js` (305 Zeilen) *und* an rund einem halben
-Dutzend Stellen in `js/musical_audio_ui.js` (2391 Zeilen).
+However, `js/musical_audio_ui.js` directly imports
+`subdivisionIndexToMusicalPosition`, `subdivisionIndexToSeconds`, and
+`timingGrid` and uses them to build **the ruler** (line 1611), time resolution
+(1115), and selection boundaries (1151/1152). The intervention therefore
+lies in `js/musical_grid.js` (305 lines) *and* at roughly half a dozen places
+in `js/musical_audio_ui.js` (2391 lines).
 
-Betroffen, vollständig:
+The complete affected set:
 
-| Funktion | Rolle |
+| Function | Role |
 |---|---|
-| `gridShape` | **Wurzel des Problems** — kapselt `beatsPerBar * subdivisionsPerBeat` |
-| `musicalPositionToSubdivisionIndex` | Hin |
-| `subdivisionIndexToMusicalPosition` | Zurück |
-| `durationFieldsToSubdivisionCount` | Dauer hin |
-| `subdivisionCountToDurationFields` | Dauer zurück |
-| `subdivisionIndexToSeconds` | Index → Zeit |
-| `musicalPositionToSeconds` | Position → Zeit |
-| `secondsToNearestSubdivision` | Zeit → Index |
-| `frameToNearestSubdivision` | Frame → Index |
-| `secondsRangeToMusicalSelection` | Selektion hin |
-| `musicalSelectionToSecondsRange` | Selektion zurück |
-| `timingGrid` | Konfigurationsobjekt, das die Shape trägt |
-| `snapToBar` / `snapToBeat` / `snapToSubdivision` | Snapping über `snapRelative` |
+| `gridShape` | **Root of the problem**—encapsulates `beatsPerBar * subdivisionsPerBeat` |
+| `musicalPositionToSubdivisionIndex` | Forward |
+| `subdivisionIndexToMusicalPosition` | Reverse |
+| `durationFieldsToSubdivisionCount` | Duration forward |
+| `subdivisionCountToDurationFields` | Duration reverse |
+| `subdivisionIndexToSeconds` | Index → time |
+| `musicalPositionToSeconds` | Position → time |
+| `secondsToNearestSubdivision` | Time → index |
+| `frameToNearestSubdivision` | Frame → index |
+| `secondsRangeToMusicalSelection` | Selection forward |
+| `musicalSelectionToSecondsRange` | Selection reverse |
+| `timingGrid` | Configuration object carrying the shape |
+| `snapToBar` / `snapToBeat` / `snapToSubdivision` | Snapping through `snapRelative` |
 
-Vierzehn Funktionen, nicht sechs. Wer `gridShape` sauber durch eine
-Tick-Auflösung ersetzt, hat den Großteil davon allerdings mitbehandelt — die
-meisten sind dünne Hüllen darüber.
+Fourteen functions, not six. Anyone who cleanly replaces `gridShape` with
+tick-based resolution will, however, have addressed most of them—the others
+are thin wrappers around it.
 
-### 3. Die Taktabelle wird vorberechnet
+### 3. The bar table is precomputed
 
-Das Lineal fragt bei jedem Repaint hunderte Positionen ab. Eine Auflösung
-über Event-Listen pro Aufruf ist zu langsam.
+The ruler queries hundreds of positions on every repaint. Resolving through
+event lists on every call is too slow.
 
-Beim Parsen einmal `bar_start_ticks[]` aufbauen, danach ist Lookup O(1).
+Build `bar_start_ticks[]` once during parsing; lookup is O(1) afterward.
 
-### 4. Rückwärtskompatibilität ist der Testvertrag
+### 4. Backward compatibility is the test contract
 
-`ConstantTempoMap` muss **alle bestehenden Tests unverändert** bestehen. Wenn
-ein Test angepasst werden muss, ist der Umbau schiefgegangen. Das ist das
-Sicherheitsnetz für den ganzen Rest.
+`ConstantTempoMap` must pass **all existing tests unchanged**. If a test has
+to be adjusted, the refactoring has gone wrong. That is the safety net for
+everything else.
 
-### 5. Score-Quellen sind eine Kette, kein Sonderfall
+### 5. Score sources form a chain, not a special case
 
-Das ist die Entscheidung, die den Analyzer später möglich macht, ohne dass
-heute eine Zeile davon geschrieben wird.
+This is the decision that makes the analyzer possible later without writing
+a single line of it today.
 
-Die Herkunft eines `Score` ist ein **Feld auf dem Datentyp**, und die Auswahl
-der Quelle ist eine **geordnete Provider-Liste**, kein `if midi_exists:`.
-Das kostet in Phase 2 fünf Minuten. Nachträglich eingezogen kostet es einen
-Umbau von Discovery, Route, Node-Output und Testkorpus gleichzeitig.
+The origin of a `Score` is a **field on the data type**, and source selection
+is an **ordered provider list**, not `if midi_exists:`. This costs five
+minutes in Phase 2. Retrofitting it later means rebuilding discovery, the
+route, node output, and the test corpus at the same time.
 
 ```python
 PROVIDERS = (
-    ExplicitFileProvider,   # score_file-Input
+    ExplicitFileProvider,   # score_file input
     SidecarJsonProvider,    # <name>.score.json
     MidiSidecarProvider,    # <name>.mid
-    AnalysisProvider,       # Audioanalyse       ← Stub, Phase 8
-    ConstantProvider,       # BPM + Taktart      ← immer erfolgreich
+    AnalysisProvider,       # Audio analysis      ← Stub, Phase 8
+    ConstantProvider,       # BPM + time signature ← always succeeds
 )
 ```
 
-Erster Provider, der einen `Score` liefert, gewinnt. `ConstantProvider` ist
-Terminator, damit die Kette nie leer zurückkommt und der Fehlerpfad nicht
-zweimal existiert.
+The first provider that supplies a `Score` wins. `ConstantProvider` is the
+terminator so that the chain never returns empty and the error path does not
+exist twice.
 
-### 6. Der Plan ist einspurig, das Material ist mehrspurig
+### 6. The plan is single-track; the material is multi-track
 
-`audio_clip_plan` produziert eine Schnittliste aus Ticks und Frames. Diese
-Liste ist **eine**, egal wie viele Spuren daran hängen. Sie auf fünf Stems
-anzuwenden ist eine Schleife am Ausgang, keine zweite Planung.
+`audio_clip_plan` produces a cut plan from ticks and frames. There is **one**
+such plan, regardless of how many tracks are attached. Applying it to five
+stems is an output loop, not a second planning pass.
 
-Die Regel, die das absichert: **Sampleindizes werden pro Spur aus dem Plan
-abgeleitet, nicht der Plan pro Spur neu gerechnet.** Zur Wortwahl siehe S6 —
-`frame` heißt in diesem Projekt Video-Frame. Sonst hat ein 48-kHz-Mix
-mit einem 44,1-kHz-Stem zwei minimal verschobene Schnittlisten, und das hörst
-du als Klick, nachdem du zwanzig Minuten woanders gesucht hast.
+The safeguarding rule: **Sample indices are derived from the plan per track;
+the plan is not recalculated per track.** For terminology, see S6—`frame`
+means video frame in this project. Otherwise, a 48-kHz mix and a 44.1-kHz
+stem produce two minimally shifted cut plans, which you hear as a click after
+spending twenty minutes looking elsewhere.
 
-Konsequenz für die Signatur: `apply_plan(plan, track) -> Segments`, aufgerufen
-je Spur. Nicht `plan_for(track)`.
+Consequence for the signature: `apply_plan(plan, track) -> Segments`, called
+for each track. Not `plan_for(track)`.
 
 ---
 
-## Datenmodell
+## Data model
 
 ```python
-# Was der Score enthält — vs. wie er gefunden wurde. Zwei Fragen, zwei Typen.
+# What the Score contains versus how it was found. Two questions, two types.
 ScoreFormat  = Literal["json", "midi", "analyzed", "constant"]
 ProviderKind = Literal["explicit", "json_sidecar", "midi_sidecar",
                        "analysis", "constant"]
@@ -184,65 +186,63 @@ class Marker:
 class Section:
     name: str
     start_tick: int
-    end_tick_exclusive: int    # halboffen, siehe S5
-    bar_aligned: bool          # liegt der Anfang exakt auf einer Taktgrenze?
-    confidence: float | None = None   # None = gesetzt statt geschätzt
+    end_tick_exclusive: int    # half-open, see S5
+    bar_aligned: bool          # does the start lie exactly on a bar boundary?
+    confidence: float | None = None   # None = specified rather than estimated
 
 @dataclass(frozen=True)
 class Score:
     ticks_per_quarter: int
     tempos: tuple[TempoEvent, ...]
     meters: tuple[MeterEvent, ...]
-    markers: tuple[Marker, ...]    # Rohpunkte aus der DAW
-    sections: tuple[Section, ...]  # kanonische Annotation, siehe S4
+    markers: tuple[Marker, ...]    # raw points from the DAW
+    sections: tuple[Section, ...]  # canonical annotation, see S4
     source: ScoreFormat
-    meter_estimated: bool = False        # Taktart geraten statt gelesen
-    has_variable_meter: bool = False     # wirklich wechselnd, siehe unten
+    meter_estimated: bool = False        # meter guessed rather than read
+    has_variable_meter: bool = False     # genuinely changing, see below
     has_midbar_meter_change: bool = False
 
 @dataclass(frozen=True)
 class ResolvedScore:
     score: Score
-    audio_seconds_at_tick_zero: float   # siehe S1
+    audio_seconds_at_tick_zero: float   # see S1
     provider: ProviderKind
 ```
 
-`start_bar`, `end_bar` und `bar_count` stehen bewusst **nicht** auf `Section`
-— sie sind abgeleitete Anzeigewerte und kommen aus dem Resolver. Bei einer
-Section, die mitten im Takt beginnt, wäre ein gespeichertes `bar_count`
-irreführend.
+`start_bar`, `end_bar`, and `bar_count` are deliberately **not** stored on
+`Section`—they are derived display values supplied by the resolver. For a
+Section beginning in the middle of a bar, a stored `bar_count` would be
+misleading.
 
-`bar_starts` steht ebenfalls nicht mehr auf `Score`: abgeleitet, nicht
-serialisiert, Resolver-interner Cache. Siehe S8.
+`bar_starts` is likewise no longer stored on `Score`: it is derived rather
+than serialized, and is an internal resolver cache. See S8.
 
-`source` und `provider` sehen redundant aus, sind es aber nicht: ein
-explizit gesetztes `score_file` kann MIDI **oder** JSON sein. `source="midi",
-provider="explicit"` ist eine sinnvolle Kombination, `source="explicit"` wäre
-eine Kategorienverwechslung.
+`source` and `provider` look redundant, but are not: an explicitly selected
+`score_file` can be MIDI **or** JSON. `source="midi", provider="explicit"`
+is a meaningful combination; `source="explicit"` would confuse categories.
 
-`has_variable_meter` wird aus den **wirksamen** Signaturen berechnet, nicht
-aus `len(meters)`. Zwei 4/4-Events an Tick 0 und 9600 sind kein
-Taktartwechsel; ein einzelnes Event an einem ungewöhnlichen Tick kann
-umgekehrt einen partiellen Takt erzeugen. Genau deshalb ist es ein Feld und
-keine Ad-hoc-Prüfung an der Aufrufstelle.
+`has_variable_meter` is calculated from the **effective** signatures, not
+from `len(meters)`. Two 4/4 events at tick 0 and 9600 are not a meter change;
+conversely, a single event at an unusual tick can create a partial bar. That
+is precisely why this is a field instead of an ad hoc check at the call site.
 
-Zwei Felder mehr als nötig, beide für später:
+Two more fields than strictly necessary, both for later:
 
-`confidence` unterscheidet „der Nutzer hat hier einen Marker gesetzt" von
-„ein Algorithmus vermutet hier eine Grenze". `None` ist dabei nicht
-„unbekannt", sondern **„Frage stellt sich nicht"** — bei MIDI ist der Marker
-Fakt. Das UI kann darauf später unterschiedlich reagieren, ohne `source`
-durchreichen zu müssen.
+`confidence` distinguishes “the user placed a marker here” from “an
+algorithm suspects a boundary here.” Here, `None` does not mean “unknown,”
+but **“the question does not apply”**—with MIDI, the marker is a fact. The UI
+can later react differently without having to pass `source` through.
 
-`meter_estimated` deckt den Fall ab, dass die Taktart nicht aus der Datei
-kommt. Ein 31/32-Takt ist aus Audio nicht erkennbar, ein 3/4 gegen 4/4 nur
-mit Glück. Wer die Zahl anzeigt, soll wissen, wie belastbar sie ist.
+`meter_estimated` covers the case where the meter does not come from the
+file. A 31/32 bar cannot be inferred from audio, and distinguishing 3/4 from
+4/4 works only with luck. Anyone displaying the value should know how
+reliable it is.
 
 ### Material
 
-Bewusst außerhalb von `Score`. Der Score ist eine Zeitachse und bleibt frei
-von Samples — sonst kann ihn das Frontend nicht mehr über die Route holen und
-der Analyzer nicht mehr als reine Funktion getestet werden.
+Deliberately outside `Score`. The Score is a time axis and remains free of
+samples—otherwise the frontend can no longer retrieve it through the route,
+and the analyzer can no longer be tested as a pure function.
 
 ```python
 @dataclass(frozen=True)
@@ -254,20 +254,20 @@ class Stem:
 @dataclass(frozen=True)
 class StemSet:
     mix: Stem
-    extra: Mapping[str, Stem]  # leer = einspuriger Normalfall
+    extra: Mapping[str, Stem]  # empty = normal single-track case
 ```
 
-`mix` ist Pflicht und ist die Referenz für Länge und Ausrichtung. Alles in
-`extra` wird gegen ihn geprüft, nicht gegeneinander.
+`mix` is required and is the reference for length and alignment. Everything
+in `extra` is checked against it, not against each other.
 
 ---
 
-### Resolver-API
+### Resolver API
 
 ```
 tick_to_seconds(tick)            -> float
 seconds_to_tick(seconds)         -> float
-bar_to_tick(bar)                 -> int      # 1-basiert
+bar_to_tick(bar)                 -> int      # 1-based
 tick_to_position(tick, spb)      -> (bar, beat, subdivision)
 position_to_tick(bar, beat, sub, spb) -> int
 meter_at_bar(bar)                -> (numerator, denominator)
@@ -276,83 +276,82 @@ sections()                       -> tuple[Section, ...]
 
 `spb` = subdivisions_per_beat.
 
-Die API ist quellenunabhängig. Das ist der ganze Punkt: Phase 6 (`Musical
-SegmentBatch`) und das Lineal rufen sie auf, ohne je zu erfahren, ob dahinter
-Cubase oder eine Self-Similarity-Matrix steckt.
+The API is source-independent. That is the entire point: Phase 6 (`Musical
+SegmentBatch`) and the ruler call it without ever learning whether Cubase or
+a self-similarity matrix is behind it.
 
 ---
 
-## Fünf Fallstricke, die vorher festgeklopft gehören
+## Five pitfalls that must be settled in advance
 
-### Extrapolation über das letzte Event hinaus
+### Extrapolation beyond the final event
 
-Cubase schreibt die Tempospur nur bis zum letzten Event. Beim Testexport
-endete die Datei bei Takt 169, obwohl der Track 233 Takte hat.
+Cubase writes the tempo track only up to the final event. In the test export,
+the file ended at bar 169 even though the track has 233 bars.
 
-**Regel:** `bar_starts` wird bis zum letzten Event vorberechnet und bei
-Resolver-Erzeugung bis zur Audiodauer verlängert (S8). Danach
-arithmetisch extrapoliert mit der zuletzt gültigen Taktart und dem zuletzt
-gültigen Tempo. Kein Fehler, kein Abbruch — das ist der Normalfall.
+**Rule:** `bar_starts` is precomputed up to the final event and extended to
+the audio duration when the resolver is created (S8). It is then
+arithmetically extrapolated using the most recently valid meter and tempo.
+No error, no abort—this is the normal case.
 
-### Tempowechsel innerhalb eines Taktes
+### Tempo changes within a bar
 
-`tick_to_seconds` muss stückweise integrieren, nicht mit einem globalen
-Faktor multiplizieren. Der aktuelle Track hat keine Tempowechsel, aber der
-Parser darf daran nicht scheitern.
+`tick_to_seconds` must integrate piecewise, not multiply by a global factor.
+The current track has no tempo changes, but the parser must not fail on them.
 
-### Marker liegen nicht zwangsläufig auf Taktgrenzen
+### Markers do not necessarily fall on bar boundaries
 
-Nicht snappen. Exakten Tick behalten, den enthaltenden Takt als `start_bar`
-ausweisen, und über `bar_aligned` sichtbar machen, dass da etwas nicht
-aufgeht. Stilles Verschieben von Nutzerdaten ist die schlechtere Variante.
+Do not snap them. Keep the exact tick, report the containing bar as
+`start_bar`, and use `bar_aligned` to expose that something does not line up.
+Silently moving user data is the worse option.
 
-### Sekunden sind keine Ticks
+### Seconds are not ticks
 
-Betrifft nur den Analyzer, aber die Regel gehört hierher, weil sie die
-Tick-Kanonik aus Entscheidung 1 berührt.
+This affects only the analyzer, but the rule belongs here because it touches
+the tick canon from decision 1.
 
-Audioanalyse liefert Beatpositionen in Sekunden. Daraus einen `Score` zu
-bauen heißt, ein Tempo zu *erfinden*, das diese Sekunden reproduziert. Zwei
-Wege, beide legitim:
+Audio analysis supplies beat positions in seconds. Building a `Score` from
+them means *inventing* a tempo that reproduces those seconds. Two approaches,
+both legitimate:
 
-- **`constant`** — Median der Beat-Abstände, ein einziges `TempoEvent` bei
-  Tick 0. Sauberes Raster, driftet bei live eingespieltem Material über die
-  Tracklänge auseinander.
-- **`follow`** — ein `TempoEvent` pro erkanntem Beat. Bleibt am Audio kleben,
-  erzeugt aber eine Tempospur mit hunderten Events, die im Lineal als
-  zappelnde Taktbreiten sichtbar wird.
+- **`constant`**—median beat interval, a single `TempoEvent` at tick 0. A
+  clean grid, but it drifts over the track length with live-played material.
+- **`follow`**—one `TempoEvent` per detected beat. It stays attached to the
+  audio but creates a tempo track with hundreds of events, visible as
+  jittering bar widths in the ruler.
 
-**Regel:** `constant` ist Default, `follow` hinter einem Schalter, und die
-Beat-Abstände werden vor beidem medianfiltert. Wer `follow` wählt, hat einen
-Grund.
+**Rule:** `constant` is the default, `follow` is behind a switch, and the beat
+intervals are median-filtered before either. Anyone choosing `follow` has a
+reason.
 
-### Stems liegen nicht zwangsläufig sample-genau
+### Stems are not necessarily sample-aligned
 
-Demucs-Output tut es, ein von Hand aus der DAW gebouncter Stem mit anderem
-Startpunkt nicht. Und der Fehler ist **stumm** — du siehst ihn erst am
-fertigen Lipsync, nach dem Rendern.
+Demucs output is; a stem manually bounced from the DAW with a different start
+point is not. And the error is **silent**—you see it only in the finished
+lipsync after rendering.
 
-**Regel:** Samplezahl und Samplerate jedes Stems gegen `mix` prüfen. Abweichung
-in der Länge über einer Toleranz von wenigen Millisekunden oder abweichende
-Samplerate → Stem verwerfen und den Grund nach `diagnostics` schreiben (S7,
-Phase 4). Also in den sichtbaren Fehlerpfad, nicht in eine Konsolenzeile.
-Nicht stillschweigend resampeln, nicht stillschweigend padden.
+**Rule:** Check the sample count and sample rate of every stem against `mix`.
+A length difference beyond a tolerance of a few milliseconds, or a differing
+sample rate → reject the stem and write the reason to `diagnostics` (S7,
+Phase 4). Put it on the visible error path, not in a console line. Do not
+silently resample and do not silently pad.
 
 ---
 
-## Verbindliche Semantik
+## Binding semantics
 
-Zehn Festlegungen, die vor Phase 2 stehen müssen. Jede einzelne ist im Nachhinein
-teuer, weil sie im Datenmodell oder im Testkorpus hängt.
+Ten stipulations that must be in place before Phase 2. Every one of them is
+expensive to change afterward because it is embedded in the data model or the
+test corpus.
 
-### S1 — Score und Audio sind zwei Dinge
+### S1 — Score and audio are separate things
 
-Bei welcher Audiosekunde liegt Tick 0? Nicht automatisch bei `0.0`: Vorlauf,
-Count-in, Export ab Locator, MIDI und Audio mit verschiedenen Startpunkten,
-negative Offsets.
+At which audio second does tick 0 occur? Not automatically at `0.0`: pre-roll,
+count-in, export from a locator, MIDI and audio with different start points,
+negative offsets.
 
-Die Ausrichtung gehört **nicht in `Score`**, weil derselbe Score mit mehreren
-Audioexporten benutzbar bleiben soll:
+The alignment belongs **outside `Score`**, because the same Score should
+remain usable with multiple audio exports:
 
 ```python
 @dataclass(frozen=True)
@@ -362,57 +361,57 @@ class ResolvedScore:
     provider: ProviderKind
 ```
 
-Die Gleichung gehört hierher, weil sie sonst irgendwo umgedreht wird:
+The equation belongs here because otherwise someone will reverse it
+somewhere:
 
 ```text
 audio_seconds  = score.tick_to_seconds(tick) + audio_seconds_at_tick_zero
 score_seconds  = audio_seconds - audio_seconds_at_tick_zero
 ```
 
-Das existierende `downbeat_offset`-Widget spielt diese Rolle bereits, und das
-Vorzeichen stimmt **exakt**: `audio_clip_plan.py` Zeile 86 rechnet
-`(start_seconds - downbeat_offset)`, also `score_seconds = audio_seconds -
-downbeat_offset`. Damit gilt ohne Umrechnung
+The existing `downbeat_offset` widget already plays this role, and its sign
+is **exactly** correct: line 86 of `audio_clip_plan.py` calculates
+`(start_seconds - downbeat_offset)`, meaning `score_seconds = audio_seconds -
+downbeat_offset`. Therefore, without conversion:
 
 ```text
 audio_seconds_at_tick_zero == downbeat_offset
 ```
 
-Der negative Fall ist dort bereits behandelt — `_nearest_grid_position` gibt
-für negative Werte „n subdivisions before Bar 1 · Beat 1" aus. Vorlauf und
-Count-in sind also kein neuer Sonderfall, sondern bestehendes Verhalten.
+The negative case is already handled there—`_nearest_grid_position` returns
+“n subdivisions before Bar 1 · Beat 1” for negative values. Pre-roll and
+count-in are therefore not new special cases, but existing behavior.
 
-Im Constant-Fallback wird der Wert unverändert übernommen; bei MIDI ist er
-der Startwert, den der Nutzer weiter korrigieren darf.
+In the constant fallback, the value is carried over unchanged; with MIDI, it
+is the starting value that the user may continue to correct.
 
-### S2 — Ticks sind ganzzahlig, Rasterpositionen werden gerundet
+### S2 — Ticks are integers; grid positions are rounded
 
-`ticks_per_quarter = 480`, `subdivisions = 7` → `480/7 = 68,571…`. Nicht jede
-Unterteilung landet auf einem Integer-Tick.
+`ticks_per_quarter = 480`, `subdivisions = 7` → `480/7 = 68.571…`. Not every
+subdivision lands on an integer tick.
 
-**Gegen rationale Tickpositionen** (`Fraction`) im Kern, obwohl sie exakt
-wären: Das Frontend kann sie nicht spiegeln. `js/score.js` rechnet mit
-`Number`, und damit läge die Exaktheit genau dort, wo sie niemand sieht,
-während die sichtbare Seite driftet — im Widerspruch zur Paritätsforderung
-aus S10.
+**Against rational tick positions** (`Fraction`) in the core, even though
+they would be exact: the frontend cannot mirror them. `js/score.js` calculates
+with `Number`, so exactness would exist precisely where nobody sees it while
+the visible side drifts—contradicting the parity requirement in S10.
 
-**Regel:** Integer-Ticks überall, plus eine *identische, deterministische*
-Rundungsregel in beiden Sprachen. Die gibt es bereits: `round_half_away_from_zero`
-in `musical_timing.py` und `roundHalfAwayFromZero` in `js/musical_grid.js`. Das
-Paritätsprimitiv ist gebaut und getestet; es muss nur benutzt werden.
+**Rule:** Integer ticks everywhere, plus an *identical, deterministic*
+rounding rule in both languages. It already exists: `round_half_away_from_zero`
+in `musical_timing.py` and `roundHalfAwayFromZero` in `js/musical_grid.js`.
+The parity primitive is implemented and tested; it only needs to be used.
 
-Ergänzend `ticks_per_quarter` bei synthetischen Scores auf **960** setzen —
-teilbar durch 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24, 32, 48, 60, 64, 80, 96,
-120, 160, 192, 240, 320, 480. Damit ist die Rundung bei allen üblichen
-Rastern ohnehin ein Nulloperation. Bei MIDI gilt die TPQ der Datei.
+In addition, set `ticks_per_quarter` for synthetic Scores to **960**—divisible
+by 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24, 32, 48, 60, 64, 80, 96, 120, 160,
+192, 240, 320, 480. This makes rounding a no-op for all common grids anyway.
+For MIDI, the file's TPQ applies.
 
-Typmodell benennt das ausdrücklich: `Tick = int` für Events,
-`seconds_to_tick() -> float` für Abfragen, gerundet wird genau an den
-Rändern zu MIDI, Sample und Video-Frame.
+The type model states this explicitly: `Tick = int` for events,
+`seconds_to_tick() -> float` for queries; rounding occurs precisely at the
+boundaries to MIDI, sample, and video frame.
 
-**Gerundet wird absolut, nie kumulativ.** Das ist die eigentliche Falle. Sieben
-Subdivisions als gerundete Breite siebenmal addiert ergibt
-`round(480/7) × 7 = 69 × 7 = 483` statt 480 — Drift trotz Integer-Ticks.
+**Rounding is absolute, never cumulative.** This is the actual trap. Adding
+the rounded width of seven subdivisions seven times produces
+`round(480/7) × 7 = 69 × 7 = 483` instead of 480—drift despite integer ticks.
 
 ```python
 tick = beat_start_tick + round_half_away_from_zero(
@@ -420,50 +419,49 @@ tick = beat_start_tick + round_half_away_from_zero(
 )
 ```
 
-Dasselbe für Taktgrenzen: immer vom letzten kanonischen Meter-Event-Anker
-rechnen, niemals gerundete Taktlängen wiederholt aufaddieren. Die
-Rundungsfunktion ist damit an jeder Stelle **einmal** im Spiel, nie in einer
-Schleife.
+The same applies to bar boundaries: always calculate from the last canonical
+meter-event anchor; never repeatedly add rounded bar lengths. The rounding
+function is therefore involved **once** at every point, never in a loop.
 
-**Zu feine Raster werden abgelehnt.** Bei `subdivisions_per_beat >
-ticks_per_beat` fallen zwei Subdivisions auf denselben Tick. Das ist kein
-Rundungsproblem mehr, sondern ein ungültiges Raster — als `invalid` melden
-oder hart auf `ticks_per_beat` begrenzen. Bei TPQ 960 liegt die Grenze so
-hoch, dass sie praktisch nie greift; ein MIDI mit TPQ 96 erreicht sie aber.
+**Over-fine grids are rejected.** With `subdivisions_per_beat >
+ticks_per_beat`, two subdivisions land on the same tick. That is no longer a
+rounding problem, but an invalid grid—report it as `invalid` or hard-limit it
+to `ticks_per_beat`. At TPQ 960 the limit is so high that it almost never
+applies, but a MIDI file with TPQ 96 can reach it.
 
-### S3 — Meterwechsel mitten im Takt erzeugt einen verkürzten Takt
+### S3 — A meter change inside a bar creates a shortened bar
 
-Exakt behalten, partiellen Takt erzeugen, Diagnose ausgeben, **niemals still
-verschieben** — dieselbe Haltung wie bei nicht ausgerichteten Markern.
+Keep it exact, create a partial bar, emit a diagnostic, and **never move it
+silently**—the same stance as for unaligned markers.
 
-Dazu die Parserdefaults, die sonst irgendwo implizit entstehen:
+Also define the parser defaults that would otherwise arise implicitly:
 
-| Fall | Regel |
+| Case | Rule |
 |---|---|
-| kein initiales Tempo | 120 BPM (MIDI-Default) |
-| keine initiale Taktart | 4/4 |
-| mehrere Events am selben Tick | letztes gewinnt |
-| Events aus mehreren Tracks | alle mergen, stabil nach `(tick, track_index, event_index)` |
-| SMPTE-Division statt PPQ | ablehnen, `INVALID` mit Diagnose |
+| no initial tempo | 120 BPM (MIDI default) |
+| no initial meter | 4/4 |
+| multiple events at the same tick | last event wins |
+| events from multiple tracks | merge all, stably by `(tick, track_index, event_index)` |
+| SMPTE division instead of PPQ | reject, `INVALID` with a diagnostic |
 
-### S4 — Sections sind kanonisch, Marker sind Rohdaten
+### S4 — Sections are canonical; markers are raw data
 
-`Score` bekommt **beide**: `markers` als das, was in der DAW steht, und
-`sections` als die Annotation, die editiert, analysiert und serialisiert wird.
+`Score` receives **both**: `markers` as what exists in the DAW, and
+`sections` as the annotation that is edited, analyzed, and serialized.
 
-Rein abgeleitete Sections wären billiger, aber ein von Hand korrigiertes
-Section-Ende, das auf keinem Marker liegt, ließe sich dann nicht verlustfrei
-speichern — und genau das ist der Zweck des JSON-Sidecars.
+Purely derived Sections would be cheaper, but a manually corrected Section
+end that does not fall on a marker could then not be saved losslessly—and
+that is precisely the purpose of the JSON sidecar.
 
-Randfälle, die festliegen müssen: zwei Marker am selben Tick, leerer Name,
-Marker vor dem ersten Takt, Marker exakt am Trackende, Section der Länge
-null, Section mit `bar_aligned = false`.
+Edge cases that must be fixed: two markers at the same tick, an empty name, a
+marker before the first bar, a marker exactly at track end, a zero-length
+Section, and a Section with `bar_aligned = false`.
 
-`start_tick` und `end_tick_exclusive` sind exakt und kanonisch. `start_bar`,
-`end_bar` und `bar_count` sind **abgeleitete Anzeigewerte** — bei einer
-Section, die mitten im Takt beginnt, ist `bar_count` sonst irreführend.
+`start_tick` and `end_tick_exclusive` are exact and canonical. `start_bar`,
+`end_bar`, and `bar_count` are **derived display values**—otherwise,
+`bar_count` is misleading for a Section that begins in the middle of a bar.
 
-### S5 — Alle Intervalle sind halboffen
+### S5 — All intervals are half-open
 
 ```text
 start_tick    end_tick_exclusive
@@ -471,30 +469,30 @@ start_sample  end_sample_exclusive
 start_frame   end_frame_exclusive
 ```
 
-mit `frame_count = end_frame_exclusive - start_frame`. Der neue Output aus
-Phase 4 heißt entsprechend `end_frame_exclusive`, nicht `end_frame`. Kostet
-sechs Zeichen und erspart die Frage, ob der letzte Frame drin ist —
-verkettete Schnittlisten und leere Bereiche werden dadurch trivial.
+with `frame_count = end_frame_exclusive - start_frame`. The new output from
+Phase 4 is therefore called `end_frame_exclusive`, not `end_frame`. Six extra
+characters eliminate the question of whether the final frame is included—
+chained cut plans and empty regions become trivial.
 
-### S6 — Vier Zeitbegriffe, keine Überladung
+### S6 — Four time concepts, no overloading
 
-`frame` bedeutet in diesem Projekt bereits **Video**-Frame. Deshalb:
+In this project, `frame` already means **video** frame. Therefore:
 
 ```text
-tick          musikalische Zeit
-seconds       reale Zeit
-video_frame   FPS-basierte Bildposition
-sample_index  Position in einer Audiospur
+tick          musical time
+seconds       real time
+video_frame   FPS-based image position
+sample_index  position in an audio track
 ```
 
-Entscheidung 6 heißt damit präzise: *Sampleindizes* werden pro Spur aus dem
-Plan abgeleitet, nicht „Frames".
+Decision 6 therefore means precisely: *Sample indices* are derived from the
+plan per track, not “frames.”
 
-### S7 — Provider melden drei Zustände
+### S7 — Providers report three states
 
-„Erster Provider mit Score gewinnt" reicht für Fehler nicht. Eine kaputte,
-**ausdrücklich angegebene** Datei darf nicht stillschweigend im
-Constant-Fallback landen — der Nutzer sucht den Fehler sonst später im Timing.
+“The first provider with a Score wins” is not enough for errors. A broken,
+**explicitly specified** file must not silently land in the constant fallback,
+or the user will look for the problem in the timing later.
 
 ```python
 @dataclass(frozen=True)
@@ -505,32 +503,32 @@ class ProviderResult:
     provenance: Mapping[str, str]
 ```
 
-`not_applicable` → weitergehen. `found` → Kette endet. `invalid` → Kette
-endet **mit Fehler**, kein Fallback. Kein `.mid` vorhanden ist
-`not_applicable`; ein vorhandenes, kaputtes `.mid` ist `invalid`.
+`not_applicable` → continue. `found` → the chain ends. `invalid` → the chain
+ends **with an error**, with no fallback. No `.mid` file present is
+`not_applicable`; a present but broken `.mid` file is `invalid`.
 
-### S8 — `bar_starts` wird nicht serialisiert
+### S8 — `bar_starts` is not serialized
 
-Es ist aus TPQ, Meter-Events und Extrapolationsziel ableitbar. Steht es
-editierbar neben `meters` im JSON, können beide sich widersprechen.
+It can be derived from TPQ, meter events, and the extrapolation target. If it
+is editable alongside `meters` in JSON, the two can contradict each other.
 
-JSON speichert kanonische Events und Annotationen. Der Resolver baut
-`bar_starts` als internen Cache. Die Route darf es ans Frontend liefern —
-dort ist es Transportoptimierung, keine Wahrheit.
+JSON stores canonical events and annotations. The resolver builds
+`bar_starts` as an internal cache. The route may deliver it to the frontend—
+there it is a transport optimization, not truth.
 
-Und die Vorberechnung endet nicht am letzten Event, sondern wird bei
-Resolver-Erzeugung bis zur **Audiodauer** verlängert. Ein früh endender
-Export ist der Normalfall, nicht die Ausnahme.
+And precomputation does not stop at the final event; it is extended to the
+**audio duration** when the resolver is created. An export that ends early is
+the normal case, not the exception.
 
-Präzisierung zu Entscheidung 3: `bar_to_tick` ist O(1), `tick_to_position`
-ist eine Binärsuche über `bar_starts` und damit O(log n). Schnell genug, aber
-das Versprechen gehört richtig formuliert.
+Clarification of decision 3: `bar_to_tick` is O(1); `tick_to_position` is a
+binary search over `bar_starts` and therefore O(log n). Fast enough, but the
+promise must be stated correctly.
 
-### S9 — Der Cache-Fingerprint umfasst die Konfiguration
+### S9 — The cache fingerprint includes configuration
 
-Quelldatei plus mtime reicht für Analyzer-Ergebnisse nicht. Analyzer-Version,
-Algorithmusversion, `beats_per_bar`, `tempo_mode`, `target_sections` und
-Schwellwerte verändern das Ergebnis genauso.
+The source file plus mtime is not sufficient for analyzer results. Analyzer
+version, algorithm version, `beats_per_bar`, `tempo_mode`, `target_sections`,
+and thresholds change the result just as much.
 
 ```json
 {
@@ -542,14 +540,14 @@ Schwellwerte verändern das Ergebnis genauso.
 }
 ```
 
-Bei `edited: true` gewinnt die Datei weiterhin — aber mit Diagnose, wenn das
-Audio sich seither geändert hat.
+With `edited: true`, the file still wins—but with a diagnostic if the audio
+has changed since.
 
-### S10 — Python und JavaScript teilen ein Golden-Korpus
+### S10 — Python and JavaScript share a golden corpus
 
-`score/tempo_map.py` und `js/score.js` implementieren dieselbe Mathematik.
-Das ist die klassische Driftstelle, und das Repo hat mit `tests/` und
-`tests_js/` bereits zwei parallele Suiten, die genau dafür gebaut sind.
+`score/tempo_map.py` and `js/score.js` implement the same mathematics. This
+is the classic point of drift, and the repository already has two parallel
+suites in `tests/` and `tests_js/` built for exactly this purpose.
 
 ```text
 tests/fixtures/scores/
@@ -562,157 +560,157 @@ tests/fixtures/scores/
     truncated_tempo_track.json
 ```
 
-Beide Sprachen prüfen dieselben Fixtures auf Tick↔Sekunden, Bar↔Tick,
-Position↔Tick, Snapping auf Takt/Beat/Subdivision, Extrapolation und
-Video-Frame-Rundung. Dazu die Invarianten — und die müssen richtig herum
-formuliert sein:
+Both languages check the same fixtures for Tick↔seconds, Bar↔Tick,
+Position↔Tick, snapping to bar/beat/subdivision, extrapolation, and
+video-frame rounding. They also check the invariants—which must be stated in
+the correct direction:
 
 ```text
-tick_to_position(position_to_tick(p)) == p          für jede gültige Position
-position_to_tick(tick_to_position(x))   ist die nach S2 nächstgelegene
-                                        Rastergrenze, nicht zwingend x
+tick_to_position(position_to_tick(p)) == p          for every valid position
+position_to_tick(tick_to_position(x))   is the nearest grid boundary under S2,
+                                        not necessarily x
 tick_to_seconds(seconds_to_tick(x))     ≈ x
-Monotonie: p1 < p2  ⟹  position_to_tick(p1) < position_to_tick(p2)
-Python und JavaScript liefern für dieselbe Fixture identische Grenzwerte
+Monotonicity: p1 < p2  ⟹  position_to_tick(p1) < position_to_tick(p2)
+Python and JavaScript produce identical boundaries for the same fixture
 ```
 
-Der Roundtrip ist nur von der **Positionsseite** verlustfrei. Ein beliebiger
-MIDI-Tick zwischen zwei Rasterpunkten wird beim Umweg über eine musikalische
-Position zwangsläufig quantisiert — das ist korrektes Verhalten, kein Fehler,
-und ein Test, der Gleichheit fordert, würde eine richtige Implementierung
-ablehnen. Die Monotonieprüfung fängt dafür die Fehler, die eine reine
-Roundtrip-Prüfung durchlässt.
+The round trip is lossless only from the **position side**. An arbitrary
+MIDI tick between two grid points is necessarily quantized when routed
+through a musical position—that is correct behavior, not an error, and a
+test requiring equality would reject a correct implementation. The
+monotonicity check instead catches the errors that a pure round-trip check
+allows through.
 
-Deterministisch erzeugte Zufalls-Fixtures für Tempo- und Meter-Maps sind
-zusätzlich sinnvoll und brauchen keine Property-Testing-Bibliothek.
+Deterministically generated random fixtures for tempo and meter maps are
+also useful and require no property-testing library.
 
 ---
 
-## Dateilayout
+## File layout
 
-Das Repo ist heute **flach** — alle Module liegen im Wurzelverzeichnis,
-`__init__.py` importiert `MusicalLoadAudioUI` und ruft
-`register_waveform_routes()` auf. `score/` und `material/` als Pakete sind
-damit eine bewusste Neuerung, keine Fortsetzung. Die Alternative wären
-`score_model.py`, `score_parse.py` usw. auf gleicher Ebene; bei der
-absehbaren Dateizahl gewinnen Pakete, aber die Entscheidung gehört benannt
-statt vorausgesetzt.
+Today, the repository is **flat**—all modules live in the root directory;
+`__init__.py` imports `MusicalLoadAudioUI` and calls
+`register_waveform_routes()`. Introducing `score/` and `material/` packages
+is therefore a deliberate change, not a continuation. The alternative would
+be `score_model.py`, `score_parse.py`, and so on at the same level. Given the
+expected number of files, packages win, but the decision must be named rather
+than assumed.
 
-Bestand, der hier mitgedacht werden muss:
+Existing files that must be considered here:
 
-| Datei | Rolle heute |
+| File | Current role |
 |---|---|
-| `waveform_routes.py` (318 Z.) | Route + ETag + Bounded Cache. **Vorbild für `score/routes.py`** |
-| `waveform_peaks.py` (521 Z.) | Peaks-Berechnung, rein |
-| `js/musical_audio_ui.js` (2308 Z.) | Node-UI |
-| `js/musical_grid.js` (305 Z.) | Der Ort von Entscheidung 2 |
-| `js/musical_audio_ui.css` (19 KB) | Theme, Gegenstand des aktuellen Branches |
-| `js/waveform_loader.js`, `js/waveform_peaks.js`, `js/metronome.js` | unberührt |
+| `waveform_routes.py` (318 lines) | Route + ETag + bounded cache. **Model for `score/routes.py`** |
+| `waveform_peaks.py` (521 lines) | Pure peak calculation |
+| `js/musical_audio_ui.js` (2308 lines) | Node UI |
+| `js/musical_grid.js` (305 lines) | The location of decision 2 |
+| `js/musical_audio_ui.css` (19 KB) | Theme, subject of the current branch |
+| `js/waveform_loader.js`, `js/waveform_peaks.js`, `js/metronome.js` | untouched |
 
-Neu bzw. geändert:
+New or changed:
 
-| Datei | Inhalt | Rein? |
+| File | Contents | Pure? |
 |---|---|---|
-| `docs/MUSICAL_TIMING_SPEC.md` | verschoben in Phase 0.5, erweitert in Phase 1 | — |
-| `docs/AUDIO_INTEGRATION_SPEC.md` | verschoben in Phase 0.5 | — |
-| `score/midi_parse.py` | `bytes` → `Score`. Kein I/O, kein ComfyUI. | ja |
-| `score/model.py` | Dataclasses + Resolver | ja |
-| `score/tempo_map.py` | `TempoMap`-Protokoll, `ConstantTempoMap`, `ScoreTempoMap` | ja |
-| `score/serialize.py` | `Score` ↔ JSON, beide Richtungen | ja |
-| `score/analyze.py` | Samples → `Score`. **Stub, Phase 8** | ja |
-| `score/naming.py` | Namensstamm, Wiederholungszähler, Seed-Ableitung | ja |
-| `material/stems.py` | `Stem`/`StemSet`, Ausrichtungsprüfung | ja |
-| `material/energy.py` | RMS-Hüllkurven, Perzentil-Gate, Onsets. **Phase 9** | ja |
-| `musical_timing.py` | bekommt optionalen `tempo_map`-Parameter | ja |
-| `audio_clip_plan.py` | reicht `tempo_map` durch, `apply_plan` je Spur | ja |
-| `score/providers.py` | Provider-Kette, Sidecar-Suche, mtime-Cache | nein |
-| `material/discovery.py` | Stem-Sidecars und `.stems/`-Ordner finden | nein |
-| `musical_audio_ui.py` | Node, `IS_CHANGED`, Fehlerpfad, neue Outputs | nein |
-| `score/routes.py` | aiohttp-Route für das Frontend | nein |
-| `js/score.js` | JS-Spiegel des Resolvers | — |
-| `js/musical_grid.js` | Umstellung auf Tick-Basis | — |
+| `docs/MUSICAL_TIMING_SPEC.md` | moved in Phase 0.5, extended in Phase 1 | — |
+| `docs/AUDIO_INTEGRATION_SPEC.md` | moved in Phase 0.5 | — |
+| `score/midi_parse.py` | `bytes` → `Score`. No I/O, no ComfyUI. | yes |
+| `score/model.py` | Dataclasses + resolver | yes |
+| `score/tempo_map.py` | `TempoMap` protocol, `ConstantTempoMap`, `ScoreTempoMap` | yes |
+| `score/serialize.py` | `Score` ↔ JSON, both directions | yes |
+| `score/analyze.py` | Samples → `Score`. **Stub, Phase 8** | yes |
+| `score/naming.py` | Name root, repetition counter, seed derivation | yes |
+| `material/stems.py` | `Stem`/`StemSet`, alignment check | yes |
+| `material/energy.py` | RMS envelopes, percentile gate, onsets. **Phase 9** | yes |
+| `musical_timing.py` | receives an optional `tempo_map` parameter | yes |
+| `audio_clip_plan.py` | passes `tempo_map` through, `apply_plan` per track | yes |
+| `score/providers.py` | Provider chain, sidecar search, mtime cache | no |
+| `material/discovery.py` | Find stem sidecars and `.stems/` directories | no |
+| `musical_audio_ui.py` | Node, `IS_CHANGED`, error path, new outputs | no |
+| `score/routes.py` | aiohttp route for the frontend | no |
+| `js/score.js` | JS mirror of the resolver | — |
+| `js/musical_grid.js` | Conversion to tick basis | — |
 
-Die Trennung rein/unrein ist bereits dein Muster — hier wird sie nur
-fortgesetzt. `analyze.py` fällt dabei auf die reine Seite: Samples rein,
-`Score` raus. Modellladen, Caching und Dateizugriff bleiben im Provider.
+The pure/impure separation is already the project's pattern—it is only being
+continued here. `analyze.py` falls on the pure side: samples in, `Score` out.
+Model loading, caching, and file access remain in the provider.
 
-`score/discovery.py` heißt jetzt `providers.py`, weil es nicht mehr sucht,
-sondern eine Kette abarbeitet.
-
----
-
-## Score-Herkunft
-
-**Sidecar-Konvention:** `velvet-lies.wav` → `velvet-lies.mid` im selben
-Verzeichnis. Automatisch, keine UI.
-
-**Override:** optionaler String-Input `score_file` für abweichende Namen.
-
-**JSON-Sidecar:** `velvet-lies.score.json` ist die Serialisierung von `Score`.
-Drei Rollen in einer Datei:
-
-- Cache für Analyseergebnisse (die kosten Sekunden, nicht Millisekunden)
-- von Hand editierbare Sections, wenn die Automatik danebenliegt
-- Austauschformat, falls mal ein anderes Tool Marker liefert
-
-Damit Cache und Handarbeit nicht kollidieren: Die Datei trägt `derived_from`
-(Quelldatei + mtime) und `edited: bool`. Ist die Quelle neuer und `edited`
-nicht gesetzt, wird verworfen und neu erzeugt. Ist `edited` gesetzt, gewinnt
-immer die JSON — dann hat jemand bewusst Hand angelegt.
-
-**Kein Score vorhanden:** `ConstantTempoMap` aus BPM und Taktart. Exakt das
-heutige Verhalten. Kein Warnhinweis, das ist ein legitimer Modus.
-
-Der aktive Provider gehört nach `score_provider` und `diagnostics`, damit im
-Graph sichtbar ist, welche Quelle greift — nicht in `musical_position`.
+`score/discovery.py` is now called `providers.py` because it no longer
+searches; it executes a chain.
 
 ---
 
-## Material-Herkunft
+## Score sources
 
-Dieselbe Idee ein zweites Mal — bewusst, weil sie sich beim Score bewährt hat
-und weil ein zweites Konzept für dasselbe Problem nur Erklärungsaufwand wäre.
+**Sidecar convention:** `velvet-lies.wav` → `velvet-lies.mid` in the same
+directory. Automatic, with no UI.
 
-**Ordner-Konvention:** `velvet-lies.wav` → `velvet-lies.stems/` daneben, im
-Demucs-Layout: `vocals.wav`, `drums.wav`, `bass.wav`, `other.wav`. Das ist
-kein erfundenes Format, sondern das, was ohnehin auf der Platte liegt, wenn
-jemand Demucs laufen lässt.
+**Override:** optional string input `score_file` for differing names.
 
-**Einzeldatei-Konvention:** `velvet-lies.vocals.wav` daneben. Für den
-häufigen Fall, dass nur der Vocal-Stem gebraucht wird und niemand die anderen
-drei herumliegen haben will.
+**JSON sidecar:** `velvet-lies.score.json` is the serialization of `Score`.
+Three roles in one file:
 
-**Override:** optionaler String-Input `stems_dir`, analog zu `score_file`.
+- Cache for analysis results (which cost seconds, not milliseconds)
+- Manually editable Sections when automation misses
+- Exchange format in case another tool ever supplies markers
 
-**Kein Stem vorhanden:** `StemSet` mit leerem `extra`. Alles Nachgelagerte
-prüft auf Anwesenheit, nichts schlägt fehl. Auch das ist ein legitimer Modus
-und braucht keinen Hinweis.
+To keep cache and manual work from colliding, the file carries `derived_from`
+(source file + mtime) and `edited: bool`. If the source is newer and `edited`
+is not set, it is discarded and regenerated. If `edited` is set, the JSON
+always wins—someone deliberately changed it.
 
-Kein zweiter Audio-Input am Node. Zwei Datei-Widgets nebeneinander laden
-förmlich dazu ein, versehentlich Mix und Stem zu vertauschen — und dieser
-Fehler ist wieder einer von der stummen Sorte.
+**No Score available:** `ConstantTempoMap` from BPM and meter. Exactly today's
+behavior. No warning; this is a legitimate mode.
+
+The active provider belongs in `score_provider` and `diagnostics` so the
+graph shows which source applies—not in `musical_position`.
 
 ---
 
-## Frontend-Transport
+## Material sources
 
-Das Lineal braucht den Score zur **Editierzeit**. Node-Outputs entstehen erst
-zur Ausführungszeit — die helfen nicht.
+The same idea a second time—deliberately, because it worked for the Score and
+because a second concept for the same problem would only add explanation.
 
-Route über `PromptServer.instance.routes`:
+**Directory convention:** `velvet-lies.wav` → `velvet-lies.stems/` beside it,
+using the Demucs layout: `vocals.wav`, `drums.wav`, `bass.wav`, `other.wav`.
+This is not an invented format; it is what already exists on disk when
+someone runs Demucs.
+
+**Single-file convention:** `velvet-lies.vocals.wav` beside it. This covers
+the common case where only the vocal stem is needed and nobody wants the
+other three lying around.
+
+**Override:** optional string input `stems_dir`, analogous to `score_file`.
+
+**No stem available:** a `StemSet` with empty `extra`. Everything downstream
+checks for presence; nothing fails. This too is a legitimate mode and needs
+no warning.
+
+No second audio input on the node. Two file widgets next to each other
+practically invite accidentally swapping the mix and stem—and this is again
+a silent kind of error.
+
+---
+
+## Frontend transport
+
+The ruler needs the Score at **edit time**. Node outputs are created only at
+execution time, so they do not help.
+
+Route through `PromptServer.instance.routes`:
 
 ```
 GET /comfyui-musical-audio/score?audio=<name>
 ```
 
-Der Namespace folgt dem Bestand: `waveform_routes.py` definiert
-`WAVEFORM_PEAK_ROUTE = "/comfyui-musical-audio/waveform-peaks"`, gespiegelt
-in `js/waveform_loader.js` als `WAVEFORM_PEAK_ENDPOINT`. Also
-`SCORE_ROUTE = "/comfyui-musical-audio/score"` und dieselbe Spiegelung, nicht
-ein zweites Präfix.
+The namespace follows the existing code: `waveform_routes.py` defines
+`WAVEFORM_PEAK_ROUTE = "/comfyui-musical-audio/waveform-peaks"`, mirrored in
+`js/waveform_loader.js` as `WAVEFORM_PEAK_ENDPOINT`. Therefore use
+`SCORE_ROUTE = "/comfyui-musical-audio/score"` and the same mirroring, not a
+second prefix.
 
-Payload, vollständig — ohne `audio_seconds_at_tick_zero` kann das Frontend
-den Score nicht über die Waveform legen:
+The complete payload—without `audio_seconds_at_tick_zero`, the frontend
+cannot overlay the Score on the waveform:
 
 ```json
 {
@@ -729,517 +727,520 @@ den Score nicht über die Waveform legen:
 }
 ```
 
-Serverseitig cachen — und zwar **nach dem Muster, das schon dasteht**.
-`waveform_routes.py` löst genau dieses Problem bereits: ETag aus Dateigröße
-und `st_mtime_ns`, `If-None-Match` wird vor jedem Cache-Zugriff geprüft und
-mit `304` beantwortet, der Cache ist größenbegrenzt und über
-`(canonical_path, mtime_ns)` verschlüsselt, die teure Arbeit läuft über
-`asyncio.to_thread`. Registrierung analog über `register_score_routes()` in
-`__init__.py`.
+Cache on the server—and follow **the pattern already present**.
+`waveform_routes.py` already solves exactly this problem: the ETag comes from
+file size and `st_mtime_ns`; `If-None-Match` is checked before every cache
+access and answered with `304`; the cache is size-bounded and keyed by
+`(canonical_path, mtime_ns)`; and expensive work runs through
+`asyncio.to_thread`. Register analogously through `register_score_routes()`
+in `__init__.py`.
 
-Kein zweites Cachekonzept. Wenn beim Bauen auffällt, dass sich Teile davon
-teilen lassen, ist das ein Refactoring wert — zwei nebeneinander laufende
-Invalidierungsstrategien sind es nicht.
+No second cache concept. If implementation reveals reusable parts, that is
+worth a refactoring—two parallel invalidation strategies are not.
 
-`bar_starts` als flaches Array reicht dem Lineal völlig — die Event-Listen
-braucht das Frontend nur für Anzeigezwecke.
+`bar_starts` as a flat array is entirely sufficient for the ruler—the
+frontend needs the event lists only for display purposes.
 
-**Reserviert für Phase 8:** Der MIDI-Parser antwortet in Millisekunden, eine
-Audioanalyse nicht. Die Route braucht deshalb einen dritten Zustand neben
-„Score" und „kein Score": `202` plus `{ status: "analyzing" }`, und das
-Frontend pollt. Diesen Fall heute schon im Client behandeln — als
-„zeige vorerst das gleichmäßige Raster" — kostet nichts und erspart später
-eine Änderung an zwei Enden gleichzeitig.
+**Reserved for Phase 8:** The MIDI parser responds in milliseconds; audio
+analysis does not. The route therefore needs a third state in addition to
+“Score” and “no Score”: `202` plus `{ status: "analyzing" }`, and the frontend
+polls. Handle this case in the client today—as “show the uniform grid for
+now”—which costs nothing and avoids changing both ends at once later.
 
 ---
 
-## Phasen
+## Phases
 
-Jede Phase endet lauffähig und testbar.
+Every phase ends in a runnable and testable state.
 
-Nach Phase 4 ist das Timing im Graph für **konstante** Taktarten korrekt,
-ohne dass `musical_audio_ui.js` (2391 Zeilen) angefasst wurde. Scores mit
-variabler oder mitten im Takt wechselnder Taktart bleiben bis zum Abschluss
-von Phase 5 nicht editierbar — siehe das Feature-Gate in Phase 4.
+After Phase 4, timing in the graph is correct for **constant** meters without
+touching `musical_audio_ui.js` (2391 lines). Scores with variable meter or a
+meter change inside a bar remain non-editable until Phase 5 is complete—see
+the feature gate in Phase 4.
 
-### Phase 0 — Hausputz
+### Phase 0 — Housekeeping
 
-Unabhängig vom Score, aber vorher fällig: der Umbau stützt sich auf die
-Testsuite, also muss die Basis tragen.
+Independent of the Score, but due first: the refactoring relies on the test
+suite, so the foundation must hold.
 
-**`IS_CHANGED` ergänzen.** ComfyUI cacht anhand der Inputs. Der Dateiname
-ändert sich beim Neuexport aus der DAW nicht, also feuert der Node nicht neu
-und arbeitet mit altem Audio weiter. Der Fehler sieht danach aus wie ein
-Timing-Problem. mtime oder Hash zurückgeben.
+**Add `IS_CHANGED`.** ComfyUI caches based on inputs. The filename does not
+change on a new export from the DAW, so the node does not rerun and continues
+working with stale audio. The error then looks like a timing problem. Return
+mtime or a hash.
 
-**Silence-Fallback sichtbar machen.** Datei fehlt oder Decode scheitert →
-eine Sekunde Stille plus `print`. In der Konsole scrollt das weg; bei einem
-Batch über 29 Segmente merkt man es erst am Ende. Fallback behalten, aber den
-Fehler zusätzlich in einen STRING-Output schreiben, der im Graph sichtbar ist.
-In Phase 0 ist das mangels `diagnostics` noch `musical_position`; Phase 4
-zieht ihn dorthin um.
+**Make the silence fallback visible.** Missing file or failed decode → one
+second of silence plus `print`. It scrolls out of the console; in a batch of
+29 segments, the problem appears only at the end. Keep the fallback, but
+also write the error to a STRING output visible in the graph. In Phase 0,
+without `diagnostics`, this is still `musical_position`; Phase 4 moves it
+there.
 
-**Drei nackte `except:` ersetzen.** `musical_audio_ui.py` Zeile 63 und 76 in
-`INPUT_TYPES`, Zeile 208 in `load_audio` um `get_annotated_filepath`. Fangen
-aktuell auch `KeyboardInterrupt` und `SystemExit`. `except Exception:` genügt.
+**Replace three bare `except:` clauses.** Lines 63 and 76 of
+`musical_audio_ui.py` in `INPUT_TYPES`, and line 208 in `load_audio` around
+`get_annotated_filepath`. They currently also catch `KeyboardInterrupt` and
+`SystemExit`. `except Exception:` is sufficient.
 
-**`VALIDATE_INPUTS` eingrenzen.** Die Signatur lautet
-`VALIDATE_INPUTS(cls, audio, **kwargs)` und gibt bedingungslos `True` zurück.
-Der Kommentar im Code erklärt korrekt, *warum* — der „Value not in list"-Fehler
-soll umgangen werden, damit der Silence-Fallback greifen kann. Nur ist das
-`**kwargs` der Fehler: ComfyUI überspringt seine eigene Prüfung für jeden
-Input, den die Signatur annimmt, und `**kwargs` nimmt alle an.
+**Narrow `VALIDATE_INPUTS`.** Its signature is
+`VALIDATE_INPUTS(cls, audio, **kwargs)` and it unconditionally returns `True`.
+The code comment correctly explains *why*—the “Value not in list” error
+should be bypassed so the silence fallback can apply. But `**kwargs` is the
+problem: ComfyUI skips its own validation for every input accepted by the
+signature, and `**kwargs` accepts all of them.
 
-Fix ist eine Zeile: `**kwargs` streichen. Dann bleibt der gewollte Effekt für
-`audio` erhalten, und alle anderen Widgets werden wieder validiert, bevor
-`musical_timing` mitten in der Ausführung `TypeError` wirft.
+The fix is one line: remove `**kwargs`. This preserves the intended effect
+for `audio`, while every other widget is validated again before
+`musical_timing` throws a `TypeError` during execution.
 
-**`start_beat` begrenzen.** Deklariert als `("INT", {"default": 1, "min": 1})`
-— kein Maximum. Beat 7 in einem 4/4-Takt knallt erst tief in
-`musical_timing`. Gegen `beats_per_bar` clampen. Gleiches gilt für
-`beats_per_bar` selbst, das ebenfalls nur ein Minimum hat.
+**Bound `start_beat`.** It is declared as
+`("INT", {"default": 1, "min": 1})`—with no maximum. Beat 7 in a 4/4 bar
+fails only deep inside `musical_timing`. Clamp it against `beats_per_bar`.
+The same applies to `beats_per_bar` itself, which also has only a minimum.
 
-**Totes `duration`-Widget klären — Vorsicht, es ist nicht tot.** Im Python
-wird es über `_ = duration, snap_mode, audioUI` verworfen, und `"duration"`
-steht gleichzeitig in `RETURN_NAMES`. Die Namenskollision ist real.
+**Clarify the dead `duration` widget—careful, it is not dead.** Python
+discards it through `_ = duration, snap_mode, audioUI`, while `"duration"`
+also appears in `RETURN_NAMES`. The naming collision is real.
 
-Im Frontend ist es aber **an acht Stellen** verdrahtet, darunter
-`setWidgetValue("duration", …)` in der Sekundensynchronisation und ein
-eigener Zweig im Widget-Callback (`musical_audio_ui.js` Zeile 2332 ff.).
-Entfernen ist damit kein Aufräumen, sondern ein Eingriff in die
-Seconds-Mode-Logik — und `AUDIO_INTEGRATION_SPEC.md` beschreibt dieses
-Verhalten ausdrücklich als gewollt.
+But in the frontend it is **wired in eight places**, including
+`setWidgetValue("duration", …)` in Seconds synchronization and a dedicated
+branch in the widget callback (`musical_audio_ui.js` line 2332 onward).
+Removing it is therefore not cleanup but an intervention in Seconds-mode
+logic—and `AUDIO_INTEGRATION_SPEC.md` explicitly describes this behavior as
+intentional.
 
-**Revidierte Empfehlung:** Widget stehen lassen. Der Rückbau ist ein eigener
-Vorgang mit Spec-Änderung, kein Hausputz.
+**Revised recommendation:** Leave the widget in place. Removing it is a
+separate operation with a specification change, not housekeeping.
 
-**Und das Umbenennen des Outputs ist auch keiner.** Ein Outputname ist
-öffentlicher Vertrag, auch bei unveränderter Position — gespeicherte Workflows
-und `tests/test_node_contract.py` referenzieren ihn. Deshalb nicht im
-Sammelcommit „Hausputz", sondern: eigener Commit, Spec-Änderung darin,
-`test_node_contract.py` bewusst angepasst, Eintrag im Changelog.
+**And renaming the output is not housekeeping either.** An output name is a
+public contract even when its position is unchanged—saved workflows and
+`tests/test_node_contract.py` refer to it. Therefore, do not include it in a
+general “housekeeping” commit. Instead: a dedicated commit, a specification
+change in it, a deliberate update to `test_node_contract.py`, and a changelog
+entry.
 
-Vertretbare Alternative: den Namen für 0.2 stehen lassen und erst bei einem
-Major-Sprung bereinigen. Eine unschöne Kollision ist nicht gefährlicher als
-ein gebrochener Workflow.
+Acceptable alternative: leave the name in place for 0.2 and clean it up only
+in a major release. An unattractive collision is no more dangerous than a
+broken workflow.
 
-*Warum zuerst:* Alles hier ist unabhängig vom Score und in einem Zug
-erledigt. Danach ist die Testsuite ein belastbares Netz für Phase 3.
+*Why first:* Everything here is independent of the Score and can be done in
+one pass. Afterward, the test suite is a reliable safety net for Phase 3.
 
-### Phase 0.5 — Ablage
+### Phase 0.5 — Documentation organization
 
-Rein mechanisch, kein Verhalten, kein Test berührt. Steht hier und nicht
-später, weil Phase 1 die Specs inhaltlich anfasst: **erst verschieben, dann
-ändern.** Beides in einem Commit macht den Diff unlesbar, weil `git` einen
-umgezogenen *und* editierten Text nicht mehr als Umzug erkennt.
+Purely mechanical: no behavior and no test touched. It appears here rather
+than later because Phase 1 changes the specifications' content: **move first,
+then edit.** Combining both in one commit makes the diff unreadable because
+`git` no longer recognizes moved *and* edited text as a move.
 
-**Schritt 1 — verschieben.** `docs/MUSICAL_TIMING_SPEC.md` und
-`docs/AUDIO_INTEGRATION_SPEC.md`, per `git mv`, ohne eine Zeile Inhalt zu
-ändern. Weder Python, JS, Tests noch `package.json` verweisen auf die
-Dateinamen — geprüft, der Umzug bricht nichts.
+**Step 1—move.** `docs/MUSICAL_TIMING_SPEC.md` and
+`docs/AUDIO_INTEGRATION_SPEC.md`, using `git mv`, without changing a line of
+content. Neither Python, JS, tests, nor `package.json` refers to the
+filenames—verified, so the move breaks nothing.
 
-**Schritt 2 — README verlinken.** Ein Abschnitt `## Documentation` mit beiden
-Pfaden. Aktuell sind die Specs aus der README **überhaupt nicht erreichbar**;
-der einzige interne Link im ganzen Dokument zeigt auf `LICENSE`.
+**Step 2—link from README.** Add a `## Documentation` section with both
+paths. Currently, the specifications are **not reachable at all** from the
+README; the only internal link in the entire document points to `LICENSE`.
 
-**Schritt 3 — Rangfolge festschreiben.** Das ist der eigentliche Aufräumpunkt,
-nicht der Ordner. Die README dupliziert normativen Inhalt in gleich vier
-Abschnitten: „Tempo interpretation", „Outputs", „Clamping and zero-length
-selections", „Compatibility". Drei Dokumente, überlappender Inhalt, nirgends
-eine Aussage, welches im Konflikt gewinnt.
+**Step 3—define precedence.** This is the real cleanup item, not the folder.
+README duplicates normative content in four sections: “Tempo
+interpretation,” “Outputs,” “Clamping and zero-length selections,” and
+“Compatibility.” Three documents, overlapping content, and no statement of
+which wins in a conflict.
 
-Zwei Sätze lösen das: In beiden Specs oben „this document is normative", in
-der README „descriptive; the specs in `docs/` take precedence". Danach darf
-die Duplizierung bleiben — sie ist dann Einstiegshilfe statt zweite Wahrheit.
+Two sentences solve it: “this document is normative” at the top of both
+specifications, and “descriptive; the specs in `docs/` take precedence” in
+README. The duplication may then remain—it is an introduction rather than a
+second truth.
 
-**Schritt 4 — belegte Inkonsistenzen mitnehmen.** Drei Stück, alle im Repo
-nachweisbar:
+**Step 4—address verified inconsistencies.** Three of them, all demonstrable
+in the repository:
 
-- README, „Version 0.1 limitations", Zeile 183: *No waveform visualization*.
-  Es gibt `waveform_peaks.py` (521 Z.), `waveform_routes.py` (318 Z.),
-  `js/waveform_loader.js`, `js/waveform_peaks.js` und zwei Testdateien dazu.
-  Der Punkt ist schlicht überholt.
-- README spricht durchgehend von 0.1, `CHANGELOG.md` steht auf 0.1.1, der
-  Branch zielt auf 0.2.0.
-- `MUSICAL_TIMING_SPEC.md` hat einen `## Status`-Abschnitt mit
-  Versionsangabe, `AUDIO_INTEGRATION_SPEC.md` hat keinen. Angleichen.
+- README, “Version 0.1 limitations,” line 183: *No waveform visualization*.
+  There are `waveform_peaks.py` (521 lines), `waveform_routes.py` (318 lines),
+  `js/waveform_loader.js`, `js/waveform_peaks.js`, and two test files for it.
+  The item is simply stale.
+- README refers to 0.1 throughout, `CHANGELOG.md` is at 0.1.1, and the branch
+  targets 0.2.0.
+- `MUSICAL_TIMING_SPEC.md` has a `## Status` section with a version;
+  `AUDIO_INTEGRATION_SPEC.md` does not. Align them.
 
-Die übrigen drei Zeilen der Limitations-Liste — keine BPM-Erkennung, keine
-Downbeat-Erkennung, keine Tempo-Maps, keine wechselnden Taktarten — bleiben
-stehen. Sie sind korrekt und werden von den Phasen 2 bis 4 und 8 der Reihe
-nach abgeräumt. Praktischerweise ist die Liste damit schon die Roadmap.
+The other three lines in the limitations list—no BPM detection, no downbeat
+detection, no tempo maps, no changing meters—remain. They are correct and
+are removed in sequence by Phases 2 through 4 and 8. Conveniently, the list
+is already the roadmap.
 
-**Kopplung an Phase 0:** `AUDIO_INTEGRATION_SPEC.md` beschreibt das
-`duration`-Widget als „remains present for positional workflow
-compatibility". Wenn Phase 0 es entfernt oder umbenennt, wird der Satz falsch.
-Diese eine Änderung gehört in den Commit von Phase 0 — an der *alten* Stelle,
-das stört den späteren `git mv` nicht.
+**Coupling to Phase 0:** `AUDIO_INTEGRATION_SPEC.md` describes the `duration`
+widget as “remains present for positional workflow compatibility.” If Phase
+0 removes or renames it, that sentence becomes false. This one change belongs
+in the Phase 0 commit—at the *old* location, which does not interfere with the
+later `git mv`.
 
-**Was ausdrücklich nicht hierher gehört:** jede inhaltliche Erweiterung der
-Specs um Score, Ticks oder Extrapolation. Das ist Phase 1. Diese Phase
-verschiebt, verlinkt und räumt Widersprüche weg — mehr nicht, sonst ist der
-Vorteil des lesbaren Diffs wieder verspielt.
+**What explicitly does not belong here:** any content expansion of the
+specifications around Score, ticks, or extrapolation. That is Phase 1. This
+phase moves, links, and removes contradictions—nothing more, or the benefit
+of the readable diff is lost again.
 
-### Phase 1 — Spec
+### Phase 1 — Specification
 
-`docs/MUSICAL_TIMING_SPEC.md` um Score, Tick-Kanonik und die
-Extrapolationsregel erweitern. Version auf 0.2 heben, 0.1-Verhalten als
-`ConstantTempoMap` festschreiben.
+Extend `docs/MUSICAL_TIMING_SPEC.md` with Score, the tick canon, and the
+extrapolation rule. Raise the version to 0.2 and define 0.1 behavior as
+`ConstantTempoMap`.
 
-Die Provider-Kette sowie `ScoreFormat` und `ProviderKind` gehören in
-denselben Text, auch wenn nur
-drei der fünf Provider gebaut werden. Ein Vertrag, der die leeren Plätze
-benennt, ist mehr wert als einer, der später aufgebohrt wird.
+The provider chain, `ScoreFormat`, and `ProviderKind` belong in the same text
+even though only three of the five providers are built. A contract naming the
+empty slots is more valuable than one that has to be widened later.
 
-*Warum vor der Implementierung:* Der Spec-Text ist der Vertrag, gegen den
-gebaut wird — und er ist das, was du Claude Code mitgibst, nicht nur den Code.
+*Why before implementation:* The specification text is the contract against
+which implementation is built—and it is what you give Claude Code, not just
+the code.
 
-### Phase 2 — Parser und Score
+### Phase 2 — Parser and Score
 
-`midi_parse.py`, `model.py` und `serialize.py`, vollständig getestet, ohne
-Anbindung. Testkorpus: die vier Sondertakte, ein Track ohne Events, ein Track
-mit Tempowechsel mitten im Takt, eine abgeschnittene Datei zur Prüfung der
-Extrapolation.
+`midi_parse.py`, `model.py`, and `serialize.py`, fully tested and without
+integration. Test corpus: the four unusual meters, a track with no events, a
+track with a tempo change inside a bar, and a truncated file to test
+extrapolation.
 
-**Prüfstein:** Takt 55 muss −1 Frame gegen das naive Raster liefern, Takt 169
-genau −3,5.
+**Touchstone:** Bar 55 must yield −1 frame against the naive grid; bar 169
+exactly −3.5.
 
-**Zweiter Prüfstein:** `Score → JSON → Score` ist verlustfrei. Kostet einen
-Test, macht Phase 8 und die Handarbeit am Sidecar später zu einem Nicht-Thema.
+**Second touchstone:** `Score → JSON → Score` is lossless. It costs one test
+and makes Phase 8 and later manual sidecar editing a non-issue.
 
-### Phase 3 — TempoMap einziehen
+### Phase 3 — Introduce TempoMap
 
-Protokoll definieren, `ConstantTempoMap` bauen, `musical_timing` und
-`audio_clip_plan` um den optionalen Parameter erweitern.
+Define the protocol, build `ConstantTempoMap`, and extend `musical_timing` and
+`audio_clip_plan` with the optional parameter.
 
-**Abnahmekriterium:** alle Alt-Tests grün, ohne eine Zeile Testcode zu ändern.
+**Acceptance criterion:** all old tests pass without changing one line of
+test code.
 
-### Phase 4 — Node-Integration
+### Phase 4 — Node integration
 
-Provider-Kette, `ResolvedScore`, neue Outputs — **ans Ende angehängt**, damit
-die bestehende Reihenfolge und `tests/test_node_contract.py` unberührt
-bleiben: `end_frame_exclusive`, `section_name`, `sample_rate`,
-`score_format`, `score_provider`, `diagnostics`.
+Provider chain, `ResolvedScore`, new outputs—**appended at the end** so the
+existing order and `tests/test_node_contract.py` remain untouched:
+`end_frame_exclusive`, `section_name`, `sample_rate`, `score_format`,
+`score_provider`, `diagnostics`.
 
-**`diagnostics` statt Überladung von `musical_position`.** Der frühere Plan
-wollte Score-Quelle, Silence-Fallback und verworfene Stems alle in
-`musical_position` schreiben. Das macht aus einem fachlichen Output einen
-Systemlogkanal. Getrennt bleibt `musical_position` die musikalische Position,
-und `diagnostics` sammelt Herkunft und Warnungen — später als JSON-String
-strukturierbar, ohne den Node-Vertrag erneut anzufassen.
+**`diagnostics` instead of overloading `musical_position`.** The earlier plan
+put the Score source, silence fallback, and rejected stems into
+`musical_position`. That turns a domain output into a system log channel.
+Keeping them separate leaves `musical_position` as the musical position, and
+`diagnostics` collects provenance and warnings—later structurally representable
+as a JSON string without changing the node contract again.
 
-**Feature-Gate für variable Meter.** Hier lag der gefährlichste Fehler im
-vorherigen Plan: „ab Phase 4 stimmt das Timing, nur das Lineal ist noch
-kosmetisch falsch" ist nicht haltbar. Der lineare Subdivision-Index steuert
-auch Selection, Snapping und Dauerumrechnung. Bei aktiver Meter-Map schreibt
-das alte Frontend also **falsche Selektionswerte zurück** — still, und in die
-Widgets, die den Node-Output bestimmen.
+**Feature gate for variable meter.** This was the most dangerous error in the
+previous plan: “from Phase 4 onward, timing is correct; only the ruler is
+cosmetically wrong” is untenable. The linear subdivision index also controls
+selection, snapping, and duration conversion. With an active meter map, the
+old frontend therefore writes **incorrect selection values back**—silently,
+and into the widgets that determine node output.
 
-Regel bis Phase 5 abgeschlossen ist — **operativ, ohne Auslegungsspielraum**:
+Rule until Phase 5 is complete—**operational, with no room for
+interpretation**:
 
-> Bei `has_variable_meter` oder `has_midbar_meter_change` beeinflusst der
-> Score weder Selection noch Snapping noch die daraus erzeugten Outputs. Die
-> Score-Daten dürfen angezeigt werden; scorebasierte Bearbeitung ist
-> deaktiviert. Das bestehende konstante Raster bleibt der alleinige
-> Bearbeitungspfad, und `diagnostics` weist aus, dass nur ein Teil der
-> Score-Information wirkt.
+> With `has_variable_meter` or `has_midbar_meter_change`, the Score affects
+> neither selection nor snapping nor the outputs produced from them. Score
+> data may be displayed; Score-based editing is disabled. The existing
+> constant grid remains the sole editing path, and `diagnostics` indicates
+> that only part of the Score information is active.
 
-Es gibt damit keinen halb aktiven Score-Modus: Entweder der Score steuert die
-Bearbeitung vollständig, oder gar nicht. `ConstantTempoMap` läuft davon
-unberührt und unbeschränkt.
+There is no partially active Score mode. Either the Score controls editing
+completely or not at all. `ConstantTempoMap` remains unaffected and
+unrestricted.
 
-Alternativ Phase 4 und 5 gemeinsam veröffentlichen. Was nicht geht: variable
-Meter editierbar ausliefern und auf das Lineal als einzigen Mangel verweisen.
+Alternatively, publish Phases 4 and 5 together. What is not acceptable is
+shipping variable meter as editable and pointing to the ruler as the only
+defect.
 
-Ab hier stimmt das Timing im Graph für den konstanten Fall.
+From this point onward, timing in the graph is correct for the constant case.
 
 ### Phase 5 — Frontend
 
-Route, `js/score.js`, Umstellung von `musical_grid.js` auf Tick-Basis,
-Lineal und Snapping.
+Route, `js/score.js`, conversion of `musical_grid.js` to a tick basis, ruler,
+and snapping.
 
-**Vormals offene Designfrage, jetzt entschieden:** zeitproportional. Die
-x-Achse ist in beiden Views die Sekundenachse einer Waveform. Gleich breite
-Takte würden bei Tempowechsel oder wechselnder Taktart nicht mehr über dem
-Audio liegen, das sie beschreiben — das wäre nur in einer separaten,
-abstrakten Partituransicht sinnvoll, und die gibt es hier nicht.
+**Formerly open design question, now decided:** time-proportional. The x-axis
+in both views is the seconds axis of a waveform. Equally wide bars would no
+longer align over the audio they describe after tempo or meter changes—that
+would make sense only in a separate, abstract score view, which does not
+exist here.
 
 ```text
-x-Achse    = Sekunden
-Taktbreite = tatsächliche Dauer des Taktes
+x-axis    = seconds
+bar width = actual duration of the bar
 ```
 
-### Phase 6 — Sections und Batch
+### Phase 6 — Sections and batch
 
-Neuer Node `MusicalSegmentBatch`: nimmt den Score, gibt eine Liste von
-Segmenten. Zwei Modi:
+New node `MusicalSegmentBatch`: accepts the Score and returns a list of
+segments. Two modes:
 
-- **Sections** — schneidet an den kanonischen `Section`-Grenzen (S4), nicht
-  an den Rohmarkern
-- **Blocks** — schneidet in feste N-Takt-Blöcke
+- **Sections**—cuts at canonical `Section` boundaries (S4), not at raw
+  markers
+- **Blocks**—cuts into fixed N-bar blocks
 
-Pro Segment: `audio`, `start_frame`, `frame_count`, `name`, `start_bar`,
-`bar_count`, `seed`. Grenzen halboffen (S5).
+Per segment: `audio`, `start_frame`, `frame_count`, `name`, `start_bar`,
+`bar_count`, `seed`. Boundaries are half-open (S5).
 
-**Seed aus dem Sectionnamen.** Der kostet fast nichts und ist der billigste
-Weg zu einem Video, das zusammenhält: Namen normalisieren, hashen, mit einem
-Basis-Seed mischen. Wiederkehrende Abschnitte sehen dadurch automatisch
-verwandt aus, ohne dass jemand 29-mal von Hand Seeds einträgt.
+**Seed from the Section name.** This costs almost nothing and is the cheapest
+way to produce a coherent video: normalize names, hash them, and mix with a
+base seed. Recurring sections then look related automatically without anyone
+entering seeds manually 29 times.
 
-**Der Hash muss stabil sein.** Nicht Pythons `hash()` — der ist für Strings
-seit 3.3 pro Prozess gesalzen, das Video sähe nach jedem ComfyUI-Neustart
-anders aus. BLAKE2 oder SHA-256, auf die Seed-Breite gekürzt. Normalisierung
-davor: NFKC, dann `casefold()`, dann Ziffernsuffix abtrennen.
+**The hash must be stable.** Do not use Python's `hash()`—since 3.3 it has
+been salted per process for strings, so the video would look different after
+every ComfyUI restart. Use BLAKE2 or SHA-256, truncated to the seed width.
+Normalization first: NFKC, then `casefold()`, then strip a numeric suffix.
 
-Drei Modi, weil die Zusammenfassung nicht immer gewünscht ist:
+Three modes, because grouping is not always desirable:
 
-| Modus | Verhalten |
+| Mode | Behavior |
 |---|---|
-| `Exact` | vollständiger Name, `Chorus 1` ≠ `Chorus 2` |
-| `Family` | Stamm, `Chorus 1` = `Chorus 2` — Default |
-| `Unique` | jede Section eigener Seed, auch bei gleichem Namen |
+| `Exact` | full name, `Chorus 1` ≠ `Chorus 2` |
+| `Family` | root, `Chorus 1` = `Chorus 2`—default |
+| `Unique` | each Section gets its own seed, even with the same name |
 
-Gehört nach `score/naming.py`, weil derselbe Normalisierer auch die
-Analyzer-Labels aus Phase 8 bedient.
+This belongs in `score/naming.py` because the same normalizer also serves the
+analyzer labels from Phase 8.
 
-**Blockgröße aus Zieldauer.** Dritter Parameter neben festem N: eine
-Zielsekundenzahl, aus der der Node die Taktzahl errechnet, die bei diesem
-Tempo am nächsten dran liegt. Schnitte fallen dann auf Taktgrenzen statt
-neben sie — siehe Phase 10.
+**Block size from target duration.** A third parameter alongside fixed N: a
+target number of seconds from which the node calculates the bar count that
+comes closest at this tempo. Cuts then fall on bar boundaries rather than
+beside them—see Phase 10.
 
-### Phase 7 — Frame-Alignment (optional)
+### Phase 7 — Frame alignment (optional)
 
-`frame_alignment` als Modus: `Off` / `8n+1` / `Custom`. Rundet `frame_count`
-auf einen für das Zielmodell gültigen Wert.
+`frame_alignment` as a mode: `Off` / `8n+1` / `Custom`. Rounds `frame_count`
+to a value valid for the target model.
 
-Der Node ist die einzige Stelle im Stack, die das musikalisch sinnvoll
-entscheiden kann, weil er weiß, wo die nächste Taktgrenze liegt.
+The node is the only place in the stack that can decide this musically,
+because it knows where the next bar boundary lies.
 
-**Konfliktstrategie, verbindlich.** Ein Segment kann nicht gleichzeitig exakt
-zwischen zwei Taktgrenzen liegen *und* exakt `8n+1` Frames lang sein. Der
-musikalische Plan wird deshalb **nie heimlich verschoben**. Stattdessen bleibt
-beides sichtbar:
+**Conflict strategy, binding.** A segment cannot lie exactly between two bar
+boundaries *and* be exactly `8n+1` frames long. Therefore the musical plan is
+**never shifted silently**. Instead, both remain visible:
 
 ```text
-musical_frame_count    aus den Taktgrenzen, wahr
-aligned_frame_count    für das Zielmodell, gültig
+musical_frame_count    from the bar boundaries, true
+aligned_frame_count    valid for the target model
 padding_before
 padding_after
 ```
 
-Der Score bleibt damit die Wahrheit, und der Zielmodell-Adapter entscheidet,
-wie er die Differenz erzeugt — Hold-Frames, Überlappung oder Beschnitt. Das
-ist eine Entscheidung des Video-Workflows, nicht des Timings.
+The Score remains truth, and the target-model adapter decides how to create
+the difference—held frames, overlap, or trimming. That is a video-workflow
+decision, not a timing decision.
 
-### Phase 8 — Audioanalyse (Stub)
+### Phase 8 — Audio analysis (stub)
 
-Für Material ohne MIDI. Nicht für diesen Track — hier ist es der Weg, das
-Ding auch auf fremdes Audio anzuwenden.
+For material without MIDI. Not for this track—here it is the path for applying
+the system to unfamiliar audio too.
 
-**Schnittstelle** (das ist der Teil, der jetzt schon feststeht):
+**Interface** (this is the part already fixed):
 
 ```python
-# score/analyze.py — rein
+# score/analyze.py — pure
 def analyze_structure(
     samples: np.ndarray,          # mono float32
     sample_rate: int,
-    beats_per_bar: int,           # Vorgabe aus dem Node, nicht erkannt
+    beats_per_bar: int,           # supplied by the node, not detected
     tempo_mode: Literal["constant", "follow"] = "constant",
     target_sections: int | None = None,
 ) -> Score:                       # source="analyzed", meter_estimated=True
     ...
 ```
 
-**Verfahren**, in der Reihenfolge, in der es gebaut würde:
+**Method**, in the order it would be built:
 
-1. Beat-Grid. Downbeat-Phase separat schätzen — ein guter Beat-Tracker sagt
-   *wo* die Beats sind, nicht welcher davon die Eins ist.
-2. Beat-synchrone Features: Chroma plus MFCC, pro Beat medianaggregiert. Ein
-   Fünf-Minuten-Track schrumpft damit auf ~600 Vektoren; ab hier ist alles
-   rechnerisch billig.
-3. Self-Similarity-Matrix, Kosinus, Diagonalen geglättet.
-4. Grenzen über Foote-Novelty mit Checkerboard-Kernel, dann Peak-Picking.
-5. Labels über Spektralclustering auf der SSM. Wiederholungserkennung, keine
-   Funktionsbenennung.
-6. Grenzen auf Downbeats snappen, Ticks synthetisieren, `Score` bauen.
+1. Beat grid. Estimate downbeat phase separately—a good beat tracker says
+   *where* the beats are, not which one is beat one.
+2. Beat-synchronous features: chroma plus MFCC, median-aggregated per beat. A
+   five-minute track shrinks to ~600 vectors, making everything from here
+   computationally cheap.
+3. Self-similarity matrix, cosine, diagonals smoothed.
+4. Boundaries using Foote novelty with a checkerboard kernel, then peak
+   picking.
+5. Labels using spectral clustering on the SSM. Repetition detection, not
+   functional naming.
+6. Snap boundaries to downbeats, synthesize ticks, build `Score`.
 
-Deps: numpy und scipy reichen. Die Eigenzerlegung über `scipy.linalg.eigh`,
-k-Means über `scipy.cluster.vq` — scikit-learn ist dafür nicht nötig.
+Dependencies: numpy and scipy are sufficient. Eigendecomposition through
+`scipy.linalg.eigh`, k-means through `scipy.cluster.vq`—scikit-learn is not
+needed for this.
 
-**Namen:** Das Verfahren liefert `A B A B C B`, nicht `verse chorus`. Für
-`section_name` heißt das `A1`, `B1`, `A2`, `B2`, `C1`, `B3` — Clusterbuchstabe
-plus Wiederholungszähler. Damit ist im Graph sowohl sichtbar, *dass* zwei
-Abschnitte gleich sind, als auch *der wievielte* es ist. Funktionale Labels
-(intro/verse/chorus) sind auf westliche Popstruktur trainiert und werden bei
-elektronischem Material beliebig; der Verzicht ist kein Kompromiss.
+**Names:** The method produces `A B A B C B`, not `verse chorus`. For
+`section_name`, that means `A1`, `B1`, `A2`, `B2`, `C1`, `B3`—cluster letter
+plus repetition counter. This makes both *that* two sections are equal and
+*which occurrence* each is visible in the graph. Functional labels
+(intro/verse/chorus) are trained on Western pop structure and become
+arbitrary for electronic material; omitting them is not a compromise.
 
-**Evaluation:** Der Analyzer wird gegen `velvet-lies.mid` gemessen. Du hast
-für diesen Track Ground Truth aus der DAW — Markerpositionen und Taktgrenzen,
-von Hand gesetzt.
+**Evaluation:** The analyzer is measured against `velvet-lies.mid`. You have
+ground truth from the DAW for this track—manually placed marker positions and
+bar boundaries.
 
-Die naheliegende Metrik „mittlere Abweichung zur nächsten echten Grenze" ist
-allerdings wertlos: Ein Analyzer, der sehr viele Grenzen ausgibt, liegt damit
-automatisch gut. Stattdessen das übliche MIR-Verfahren:
+However, the obvious metric, “mean distance to the nearest true boundary,”
+is worthless: an analyzer producing many boundaries automatically scores
+well. Use the standard MIR method instead:
 
-- eindeutiges One-to-one-Matching erkannter und echter Grenzen
-- Toleranzfenster von einem halben bis einem Takt
-- **Precision** (wie viele erkannte Grenzen sind echt) und **Recall** (wie
-  viele echten Grenzen wurden gefunden), daraus F1
-- mittlere Abweichung nur über die gematchten Grenzen
-- Zahl der Über- und Untersegmentierungen getrennt ausweisen
+- unique one-to-one matching of detected and true boundaries
+- tolerance window of half a bar to one bar
+- **Precision** (how many detected boundaries are real) and **Recall** (how
+  many true boundaries were found), producing F1
+- mean distance only over matched boundaries
+- report over-segmentation and under-segmentation counts separately
 
-Erst damit werden „zu viele Grenzen" und „wichtige Grenze fehlt" als zwei
-verschiedene Fehler sichtbar — und genau die unterscheiden ein brauchbares
-Ergebnis von einem, das nur gut aussieht.
+Only then do “too many boundaries” and “an important boundary is missing”
+become visibly different errors—and that distinction separates a useful
+result from one that merely looks good.
 
-Das ist der Grund, warum diese Phase hinten steht und trotzdem hier
-dokumentiert ist: Der einzige Track, an dem sich die Automatik ehrlich prüfen
-lässt, ist genau der, für den man sie nicht braucht.
+That is why this phase comes late yet is documented here: the only track on
+which the automation can be evaluated honestly is exactly the one for which
+it is not needed.
 
-**Was ausdrücklich nicht gebaut wird:** `allin1` als Backend. Liefert zwar
-Downbeats und funktionale Labels direkt, hängt aber an NATTEN — einer
-kompilierten Extension, die zur exakten Torch-Version passen muss. In einem
-ComfyUI-Node hieße das, die Torch-Installation fremder Leute zur Geisel zu
-nehmen. Dazu rund 1,5 GB Modelle beim ersten Lauf. Als optionaler Provider in
-separatem venv per Subprozess denkbar, als Dependency nicht.
+**What is explicitly not built:** `allin1` as a backend. It supplies downbeats
+and functional labels directly, but depends on NATTEN—a compiled extension
+that must match the exact Torch version. In a ComfyUI node, this would make
+other people's Torch installations hostage to it. It also downloads roughly
+1.5 GB of models on first use. Conceivable as an optional provider in a
+separate venv through a subprocess; not as a dependency.
 
-**Lizenzhinweis, korrigiert:** Das Repo steht bereits unter **GPL-3.0**, nicht
-unter einer permissiven Lizenz. Damit ist die Lage entspannter als zunächst
-angenommen — GPLv3 erlaubt in §13 ausdrücklich die Kombination mit
-AGPLv3-Code, das Ergebnis bleibt verteilbar.
+**License note, corrected:** The repository is already under **GPL-3.0**, not
+a permissive license. The situation is therefore less restrictive than first
+assumed—GPLv3 §13 expressly permits combination with AGPLv3 code, and the
+result remains distributable.
 
-Der Rest der Klausel gilt trotzdem: Der AGPL-Teil behält seine
-Netzwerkbedingung, und ComfyUI *ist* ein HTTP-Server. Das ist genau die
-Konstellation, auf die AGPL §13 zielt. Praktische Konsequenz für jemanden,
-der ComfyUI lokal fährt: keine. Für jemanden, der es gehostet anbietet:
-möglicherweise doch.
+The rest of the clause still applies: the AGPL component retains its network
+condition, and ComfyUI *is* an HTTP server. That is precisely the situation
+targeted by AGPL §13. Practical consequence for someone running ComfyUI
+locally: none. For someone offering it as a hosted service: possibly.
 
-Empfehlung bleibt deshalb unverändert, nur mit anderer Begründung: Essentia
-als **optionales Extra mit lazy Import**, damit die Standardinstallation
-schlicht GPL-3.0 bleibt und niemand über eine Bedingung stolpert, die er sich
-nicht ausgesucht hat. Die Analysekette oben kommt ohnehin mit numpy und scipy
-aus. (Kein Rechtsrat — wenn das Pack veröffentlicht wird, gehört das einmal
-richtig geprüft.)
+The recommendation therefore remains unchanged, only for a different reason:
+Essentia as an **optional extra with lazy import**, so the standard
+installation remains simply GPL-3.0 and nobody stumbles into a condition they
+did not choose. The analysis chain above works with numpy and scipy anyway.
+(Not legal advice—if the package is published, this should be reviewed
+properly once.)
 
 ### Phase 9 — Stems
 
-Setzt Phase 6 voraus, sonst nichts. Unabhängig von Phase 8 — Stems und
-Analyzer haben außer dem Wort „Audio" nichts miteinander zu tun.
+Requires Phase 6 and nothing else. Independent of Phase 8—stems and the
+analyzer have nothing in common except the word “audio.”
 
-**Basis:** Discovery nach den beiden Konventionen, Ausrichtungsprüfung,
-`apply_plan` je Spur. Pro Segment kommt neben `audio` ein `audio_vocals`
-heraus, und was sonst gefunden wurde.
+**Foundation:** Discovery according to the two conventions, alignment check,
+and `apply_plan` for each track. Alongside `audio`, each segment emits
+`audio_vocals` and whatever else was found.
 
-**Vocal-Ausgabe für Lipsync** gleich in 16 kHz mono. Das wollen die
-Lipsync-Nodes ohnehin, und ein Resample-Node weniger im Graph ist ein
-Handgriff weniger pro Shot.
+**Vocal output for lipsync** directly as 16 kHz mono. The lipsync nodes need
+that anyway, and one fewer resample node in the graph is one fewer manual step
+per shot.
 
-**Der eigentliche Gewinn ist nicht der Ton, sondern die Klassifikation.**
-Frame-RMS des Vocal-Stems pro Section messen, und der Node weiß, wo gesungen
-wird und wo nicht. Das ist die Entscheidung zwischen Performance-Shot und
-B-Roll — bei 29 Shots eine Handarbeit, die ersatzlos entfällt. Kostet keine
-ML, weil die schwere Arbeit beim Separieren schon passiert ist.
+**The real gain is not the sound but the classification.** Measure frame RMS
+of the vocal stem per Section, and the node knows where singing occurs and
+where it does not. That is the choice between a performance shot and B-roll—
+for 29 shots, a manual task that disappears entirely. It requires no ML
+because the heavy work already occurred during separation.
 
-Zwei Outputs dafür:
+Two outputs for this:
 
-- `has_vocals: bool` — **hohes Perzentil** der Frame-RMS gegen einen
-  Schwellwert, nicht der Mittelwert. Stems haben Bleed und Hallfahnen; ein
-  Gate über den Mittelwert feuert im halben Instrumentalteil.
-- `vocal_onset_seconds` — erster Einsatz *innerhalb* des Segments. Sekunden,
-  nicht Frames: die Umrechnung auf Video-Frames braucht die fps und gehört
-  an den Rand (S6). Beginnt der
-  Gesang 1,2 s nach Segmentanfang, ist das eine Kamerafahrt hinein und kein
-  Schnitt darauf. Diese Zahl ist im Graph unmittelbar verwertbar.
+- `has_vocals: bool`—a **high percentile** of frame RMS against a threshold,
+  not the mean. Stems contain bleed and reverb tails; a gate over the mean
+  triggers in half of the instrumental part.
+- `vocal_onset_seconds`—the first entry *within* the segment. Seconds, not
+  frames: conversion to video frames needs fps and belongs at the boundary
+  (S6). If vocals begin 1.2 s after the segment start, that suggests a camera
+  move into the shot, not a cut onto it. This value is directly useful in the
+  graph.
 
-**Drums und Bass sind Kurven, keine Schnitte** — Bass-Energie auf Zoom oder
-Shake, Drum-Onsets auf IPAdapter-Gewichte. Anderer Output-Typ, anderer
-Lebenszyklus, deshalb ein eigener Node `MusicalEnvelope` statt weiterer
-Outputs am Batch. Nicht Teil dieser Phase, nur der Grund, warum `StemSet`
-generisch über `extra` geht und nicht `vocals: Stem | None` heißt.
+**Drums and bass are curves, not cuts**—bass energy for zoom or shake, drum
+onsets for IPAdapter weights. Different output type, different lifecycle, so
+use a separate `MusicalEnvelope` node instead of adding outputs to the batch.
+Not part of this phase; it is only why `StemSet` is generic over `extra`
+rather than named `vocals: Stem | None`.
 
-### Phase 10 — Manifest und Shotlist-Brücke
+### Phase 10 — Manifest and shot-list bridge
 
-Der Batch weiß alles, was eine Shotlist braucht: Nummer, Name, Takt,
-Taktzahl, Dauer, Vocal-Flag. Ein Manifest-Output (JSON plus Markdown) macht
-daraus die Übergabe an den Prompt-Schritt.
+The batch knows everything a shot list needs: number, name, bar, bar count,
+duration, vocal flag. A manifest output (JSON plus Markdown) turns this into
+the handoff to the prompting step.
 
-Damit schließt sich die Kette: Ein Shotlist-Generator arbeitet in festen
-Sekundenhäppchen, dein `Blocks`-Modus in Takten. Bei bekanntem Tempo ist das
-dieselbe Größe in anderer Einheit — die Umrechnung aus Phase 6 lässt die
-Shotlist auf die Musik fallen statt daneben.
+This closes the chain: a shot-list generator works in fixed chunks of
+seconds; the `Blocks` mode works in bars. At a known tempo, these are the same
+size in different units—the conversion from Phase 6 makes the shot list land
+on the music rather than beside it.
 
-Optional daran anschließend: Manifest plus Mood-Tags an ein lokales Modell
-geben und pro Segment einen Bildprompt schreiben lassen. Das ist die Stelle,
-an der ein LLM in dieser Kette tatsächlich etwas beiträgt — beim Übersetzen
-der Struktur in Prompts, nicht bei der Analyse.
+Optionally afterward: send the manifest plus mood tags to a local model and
+have it write one image prompt per segment. This is where an LLM actually
+contributes to this chain—translating structure into prompts, not analyzing
+it.
 
 ---
 
-## Paralleler Strang: Waveform-Editor (v0.2.0)
+## Parallel strand: Waveform Editor (v0.2.0)
 
-Stand `604e5ab`, neunter v0.2-Commit, fünf Schritte offen. Der Strang ist vom
-Score weitgehend unabhängig — bis auf zwei Berührungspunkte, die weiter unten
-stehen. Er gehört hierher, weil beide Stränge dieselbe Datei anfassen.
+State at `604e5ab`, ninth v0.2 commit, five steps open. The strand is largely
+independent of Score except for two points of contact described below. It
+belongs here because both strands touch the same file.
 
-### Was steht (am Commit verifiziert)
+### What exists (verified at the commit)
 
-- `js/waveform_renderer.js` (351 Z.) mit `createWaveformRenderPlan`,
+- `js/waveform_renderer.js` (351 lines) with `createWaveformRenderPlan`,
   `renderWaveformCanvas`, `clearWaveformCanvas`
-- Der Renderer nimmt bereits `startSeconds`/`endSeconds` und wählt daraus die
-  Pyramidenebene. **Die Annahme aus Schritt 5 stimmt** — Zoom braucht keinen
-  neuen Renderer, nur veränderte Zeitgrenzen.
-- `MAX_WAVEFORM_RENDER_WIDTH = 1_000_000` und
-  `MAX_WAVEFORM_DEVICE_PIXEL_RATIO = 4` sind bereits Deckel im Code. Die
-  Warnung vor der trackbreiten Canvas ist damit nicht nur Vorsatz.
-- `node._musicalAudioWaveformState`, `node._musicalAudioWaveformRenderer` mit
-  `destroyed`, `animationFrameId`, `resizeObserver`
-- `node.scheduleMusicalAudioWaveformRender()` als koaleszierender Scheduler
-- `onRemoved`-Hook mit `cancelAnimationFrame` und `resizeObserver.disconnect()`
-- Der Rücksprung an den Selektionsstart am Selektionsende existiert bereits
-- Kein Playhead, kein Modal, kein Zoom, kein `showExtensionDialog` — bestätigt
+- The renderer already accepts `startSeconds`/`endSeconds` and selects the
+  pyramid level from them. **The assumption from Step 5 is correct**—zoom
+  needs no new renderer, only changed time boundaries.
+- `MAX_WAVEFORM_RENDER_WIDTH = 1_000_000` and
+  `MAX_WAVEFORM_DEVICE_PIXEL_RATIO = 4` are already caps in the code. The
+  warning against a track-wide canvas is therefore more than an intention.
+- `node._musicalAudioWaveformState`, `node._musicalAudioWaveformRenderer`
+  with `destroyed`, `animationFrameId`, `resizeObserver`
+- `node.scheduleMusicalAudioWaveformRender()` as a coalescing scheduler
+- `onRemoved` hook with `cancelAnimationFrame` and
+  `resizeObserver.disconnect()`
+- The return to selection start at selection end already exists
+- No playhead, no modal, no zoom, no `showExtensionDialog`—confirmed
 
-### Drei Korrekturen am Schrittpapier
+### Three corrections to the step plan
 
-**`audioEl` liegt im Closure, nicht am Node.** Zeile 560,
-`const audioEl = document.createElement("audio")`. Alles andere Geteilte hängt
-am Node — das Audioelement nicht. Schritt 4 verlangt „reuse the same
-audioEl"; das ist heute schlicht nicht erreichbar.
+**`audioEl` is in the closure, not on the node.** Line 560:
+`const audioEl = document.createElement("audio")`. Everything else shared is
+attached to the node—the audio element is not. Step 4 requires “reuse the
+same audioEl”; today, it is simply unreachable.
 
-Vorschlag: **nicht das Element exponieren**, sondern eine Transportfassade
-`node._musicalAudioTransport` mit `getCurrentTime()`, `seek(seconds)`,
-`isPlaying()`, `subscribe(fn)`. Wer das rohe Element bekommt, hängt Listener
-direkt daran, und dann ist das Aufräumen beim Schließen des Modals nicht mehr
-an einer Stelle kontrollierbar. Die Fassade sind fünfzehn Zeilen und machen
-Schritt 6 („zwei Views, eine Uhr") überhaupt erst durchsetzbar.
+Proposal: **do not expose the element**. Instead, expose a transport facade
+`node._musicalAudioTransport` with `getCurrentTime()`, `seek(seconds)`,
+`isPlaying()`, `subscribe(fn)`. Anyone receiving the raw element can attach
+listeners directly, after which cleanup when closing the modal is no longer
+controlled in one place. The facade takes fifteen lines and makes Step 6
+(“two views, one clock”) enforceable in the first place.
 
-Diese Vorarbeit gehört nach **Schritt 2**, nicht nach Schritt 4 — der
-Playhead ist ihr erster Konsument, und dort ist sie noch billig.
+This preparation belongs after **Step 2**, not after Step 4—the playhead is
+its first consumer, and it is still inexpensive there.
 
-**Der Playhead braucht eine zweite rAF-Schleife — und das ist korrekt.**
-`scheduleMusicalAudioWaveformRender` ist ein *einmaliger* Scheduler: maximal
-ein Frame in Flight, danach `animationFrameId = null`. Der Playhead braucht
-eine *laufende* Schleife während der Wiedergabe. Andere Form, eigener Handle.
+**The playhead needs a second rAF loop—and that is correct.**
+`scheduleMusicalAudioWaveformRender` is a *one-shot* scheduler: at most one
+frame in flight, then `animationFrameId = null`. The playhead needs a
+*continuous* loop during playback. Different form, separate handle.
 
-Die Falle: Der neue Handle muss ins selbe `runtime`-Objekt. In `onRemoved`
-wird heute genau ein `runtime.animationFrameId` gecancelt. Eine Schleife, die
-dort nicht registriert ist, läuft nach dem Löschen des Nodes weiter — mit
-einer Closure auf totes DOM. Das ist der wahrscheinlichste Fehler in
-Schritt 2 und der am schwersten zu findende.
+The trap: the new handle must be stored in the same `runtime` object. Today,
+`onRemoved` cancels exactly one `runtime.animationFrameId`. A loop not
+registered there continues after the node is deleted—with a closure over dead
+DOM. That is the most likely bug in Step 2 and the hardest one to find.
 
-**`app.extensionManager` ist bereits im Einsatz** (`setting.get`, Zeile 102).
-Der Spike aus Schritt 3 muss deshalb nur noch `dialog.showExtensionDialog`
-und das Vue-Mounting klären, nicht den Zugriff auf den Manager selbst. Das
-verkleinert den Spike spürbar.
+**`app.extensionManager` is already in use** (`setting.get`, line 102). The
+spike from Step 3 therefore needs to clarify only `dialog.showExtensionDialog`
+and Vue mounting, not access to the manager itself. This makes the spike
+materially smaller.
 
-### Zwei Berührungspunkte mit dem Score
+### Two points of contact with the Score
 
-**Das Lineal wird sonst zweimal gebaut.** Schritt 4 sieht eine „large ruler
-area" im Modal vor. Das Node-Lineal hängt heute an `subdivisionIndexToSeconds`
-(Zeile 1611) — also an genau dem Index, den Entscheidung 2 entfernt. Wer das
-Modal-Lineal auf demselben Index baut, schreibt es zweimal.
+**Otherwise the ruler is built twice.** Step 4 calls for a “large ruler area”
+in the modal. The node ruler currently depends on `subdivisionIndexToSeconds`
+(line 1611)—the very index removed by decision 2. Building the modal ruler on
+the same index writes it twice.
 
-Die Auflösung ist aber **nicht** „Phase 3 abwarten", wie hier zuvor stand.
-Dieselbe Fassadenlogik wie beim Transport löst es besser:
+The solution is **not** “wait for Phase 3,” as previously stated here. The
+same facade logic as for the transport solves it better:
 
 ```js
 const timeAxis = {
@@ -1250,210 +1251,203 @@ const timeAxis = {
 };
 ```
 
-Heute `ConstantTimeAxis`, später `ScoreTimeAxis`. Damit lassen sich
-Modal-Shell, Playhead, Zoom und Scrollen sofort bauen, und nur das Backend
-des Lineals wird ausgetauscht. Der Reihenfolgezwang schrumpft auf eine Regel:
+Use `ConstantTimeAxis` today and `ScoreTimeAxis` later. This allows the modal
+shell, playhead, zoom, and scrolling to be built immediately, with only the
+ruler backend replaced later. The ordering constraint shrinks to one rule:
 
-> Das Modal-Lineal darf nicht direkt auf dem linearen Subdivision-Index
-> aufsetzen.
+> The modal ruler must not be built directly on the linear subdivision index.
 
-**Sections gehören ins Lineal, nicht in eine eigene Spur.** Sobald Phase 4
-steht, hat das Modal etwas anzuzeigen, das es vorher nicht gab: benannte
-Bereiche. Die in Schritt 4 reservierte Toolbar-Fläche ist der falsche Ort —
-Sections sind zeitgebunden und gehören als Band unter das Lineal, in dieselbe
-Zeitachse.
+**Sections belong in the ruler, not in a separate track.** Once Phase 4
+exists, the modal has something to display that did not exist before: named
+regions. The toolbar area reserved in Step 4 is the wrong place—Sections are
+time-bound and belong as a band beneath the ruler, on the same time axis.
 
-Daraus wird auf Dauer ein **Score-Inspector**: schaltbare Layer für Tempo,
-Taktart, Sections, Marker und Vocal-Aktivität aus Phase 9. Nicht alles
-gleichzeitig sichtbar, sondern als Layer-Auswahl — dann wächst das Modal zum
-musikalischen Inspektor, ohne den Node selbst aufzublähen.
+Over time, this becomes a **Score inspector**: switchable layers for tempo,
+meter, Sections, markers, and vocal activity from Phase 9. Do not show
+everything at once; use layer selection. The modal then grows into a musical
+inspector without bloating the node itself.
 
-Drei kleine Funktionen, die davon fast geschenkt abfallen, sobald Sections im
-Modal liegen: Sprung zur vorigen/nächsten Section, Zoom auf die aktuelle
-Section, Selektion auf Sectiongrenzen setzen. Dazu `Follow playhead` mit
-`Off` / `Page` / `Center`, wobei `Page` beim Arbeiten meist angenehmer ist als
-dauerndes Mitscrollen.
+Three small functions become almost free once Sections are in the modal:
+jump to previous/next Section, zoom to the current Section, and set selection
+to Section boundaries. Add `Follow playhead` with `Off` / `Page` / `Center`,
+where `Page` is usually more pleasant during editing than constant scrolling.
 
-Langfristig, aber hier schon erwähnenswert, weil es die Begründung für S4
-liefert: Marker und Sections direkt im Modal verschieben, umbenennen, teilen
-und als `.score.json` speichern. Genau dafür müssen Sections kanonisch sein
-und nicht aus Markern abgeleitet.
+Long-term, but worth mentioning here because it explains S4: move, rename,
+split, and save markers and Sections directly in the modal as `.score.json`.
+That is precisely why Sections must be canonical instead of derived from
+markers.
 
-### Verzahnte Reihenfolge
+### Interleaved order
 
-| Reihe | Warum hier |
+| Sequence | Why here |
 |---|---|
-| Schritt 2 + Transportfassade | unabhängig, und die Fassade ist später teurer |
-| Phase 0, Phase 0.5 | unabhängig, kein Risiko |
-| Schritt 3 (Spike) | klein, klärt das größte Unbekannte früh |
-| Phase 1–3 | Score-Kern, unabhängig vom Modal |
-| Schritt 4–6 | Modal, Lineal gleich tickbasiert |
-| Phase 4 | Score im Graph, Sections für das Modal |
-| Phase 5 | Tick-Umstellung in beiden Views auf einmal |
-| Phase 6 ff. | Batch, Stems, Manifest |
+| Step 2 + transport facade | independent, and the facade is more expensive later |
+| Phase 0, Phase 0.5 | independent, no risk |
+| Step 3 (spike) | small, resolves the largest unknown early |
+| Phase 1–3 | Score core, independent of the modal |
+| Step 4–6 | modal, ruler tick-based from the start |
+| Phase 4 | Score in the graph, Sections for the modal |
+| Phase 5 | tick conversion in both views at once |
+| Phase 6 onward | batch, stems, manifest |
 
-Harte Zwänge gibt es darin nur zwei: variable Meter-Maps bleiben bis zum
-Abschluss von Phase 5 read-only (Feature-Gate in Phase 4), und das
-Modal-Lineal darf nicht auf dem linearen Subdivision-Index aufsetzen. Alles
-andere lässt sich tauschen.
-
----
-
-## Was den Aufwand treibt
-
-Nicht der Parser. Der ist überschaubar.
-
-Der Kostenpunkt ist **Entscheidung 2** — den linearen Index aus dem Frontend
-zu operieren. Das berührt Snapping, Selection, Lineal und die
-Sekunden-Rückrechnung. Wenn beim Planen etwas ausführlich durchdacht gehört,
-dann das.
-
-Phase 8 ist davon unabhängig teuer, aber in anderer Währung: der Code ist
-kurz, das Tuning ist lang. Novelty-Threshold, Kernelgröße, Clusteranzahl —
-das kalibriert man gegen Ohr und Ground Truth, nicht gegen einen Unit-Test.
-Deshalb Stub und nicht Ticket.
-
-Phase 9 ist umgekehrt billiger, als sie aussieht. Das Schneiden ist eine
-Schleife über eine Liste, die es schon gibt. Der Aufwand steckt vollständig
-in Discovery und Ausrichtungsprüfung — also in den unreinen Rändern, nicht
-im Kern.
+There are only two hard constraints: variable meter maps remain read-only
+until Phase 5 is complete (feature gate in Phase 4), and the modal ruler must
+not use the linear subdivision index. Everything else can be reordered.
 
 ---
 
-## Reihenfolge, falls die Zeit knapp wird
+## What drives the effort
 
-Phase 0 allein lohnt sich schon: `IS_CHANGED` behebt das Cache-Problem, und
-der sichtbare Fehlerpfad erspart dir die Suche nach stillen Segmenten. Ein
-Abend, kein Risiko.
+Not the parser. It is manageable.
 
-Phase 0.5 kostet eine Stunde und ist die einzige Phase ohne jedes Risiko —
-kein Code, keine Tests, nur `git mv` und Text. Wenn sie nicht direkt nach
-Phase 0 kommt, kommt sie nie, weil sie ab Phase 1 mit inhaltlichen Änderungen
-verschmilzt und dann keine eigene Phase mehr ist.
+The cost center is **decision 2**—removing the linear index from the
+frontend. It affects snapping, selection, the ruler, and conversion back to
+seconds. If anything deserves detailed thought during planning, it is this.
 
-Phase 4 liefert danach den größten Nutzen pro Aufwand: ab da ist das Timing
-korrekt und du kannst mit dem Video-Workflow anfangen.
+Phase 8 is independently expensive, but in another currency: the code is
+short, the tuning is long. Novelty threshold, kernel size, cluster count—
+calibrate them against hearing and ground truth, not against a unit test.
+That is why it is a stub rather than a ticket.
 
-Phase 6 ist der eigentliche Hebel für dein Projekt — 29 Shots aus einem
-Knoten statt 29 Handgriffe.
-
-Phase 5 ist für konstante Taktarten aufschiebbar und hat den höchsten
-Aufwand. Für variable Taktarten ist sie dagegen zwingend: Bis sie steht,
-bleiben solche Scores read-only. „Kosmetik" wäre sie nur ohne das
-Feature-Gate — mit ihm ist sie die Freischaltung eines halben Features.
-
-Phase 9 gehört direkt hinter 6, wenn Lipsync im Plan steht. Sie ist die
-einzige der späten Phasen mit gutem Aufwand-Nutzen-Verhältnis, weil sie auf
-einer fertigen Schnittliste aufsetzt und nur an den Rändern arbeitet.
-
-Phase 8 ist danach, oder nie. Solange du aus Cubase exportierst, ist sie
-reine Kür — und wenn sie kommt, ist durch Entscheidung 5 der Platz dafür
-schon freigehalten.
-
-Phase 10 ist eine Serialisierung von Daten, die alle schon vorliegen. Ein
-Nachmittag, sobald 6 und 9 stehen.
+Conversely, Phase 9 is cheaper than it looks. Cutting is a loop over a list
+that already exists. All the effort lies in discovery and alignment checks—
+the impure edges, not the core.
 
 ---
 
-## Was diese Revision ergänzt
+## Order when time is limited
 
-Zwei Erweiterungen, beide so geschnitten, dass sie in den frühen Phasen
-nichts kosten.
+Phase 0 is worthwhile by itself: `IS_CHANGED` fixes the caching problem, and
+the visible error path saves the search for silent segments. One evening, no
+risk.
 
-**Score-Quellen** (im Dienst von Phase 8):
+Phase 0.5 costs an hour and is the only phase with no risk at all—no code, no
+tests, only `git mv` and text. If it does not happen directly after Phase 0,
+it never will, because from Phase 1 onward it merges with content changes and
+ceases to be a separate phase.
 
-- Entscheidung 5: Provider-Kette statt Fallunterscheidung
+Phase 4 then offers the greatest benefit per unit of effort: from there,
+timing is correct and work on the video workflow can begin.
+
+Phase 6 is the actual leverage for this project—29 shots from one node instead
+of 29 manual steps.
+
+Phase 5 can be deferred for constant meters and has the highest cost. For
+variable meters, however, it is mandatory: such Scores remain read-only until
+it is done. It would be “cosmetic” only without the feature gate—with it,
+Phase 5 enables half a feature.
+
+Phase 9 belongs directly after 6 if lipsync is planned. It is the only late
+phase with a strong cost-benefit ratio because it builds on a finished cut
+plan and works only at the edges.
+
+Phase 8 comes afterward, or never. As long as exports come from Cubase, it is
+purely optional—and if it arrives, decision 5 has already reserved a place
+for it.
+
+Phase 10 serializes data that already exists. One afternoon once 6 and 9 are
+in place.
+
+---
+
+## What this revision adds
+
+Two extensions, both shaped so they cost nothing in the early phases.
+
+**Score sources** (in service of Phase 8):
+
+- Decision 5: provider chain instead of branching
 - `Score.source`, `Score.meter_estimated`, `Section.confidence`
-- Fallstrick „Sekunden sind keine Ticks" samt `constant`/`follow`-Regel
-- `score/serialize.py` und das JSON-Sidecar mit `derived_from`/`edited`
+- The “Seconds are not ticks” pitfall, including the `constant`/`follow` rule
+- `score/serialize.py` and the JSON sidecar with `derived_from`/`edited`
 - `discovery.py` → `providers.py`
-- `202 analyzing` als reservierter Zustand der Route
-- Phase 8 als Stub mit fixierter Schnittstelle und Evaluationsplan
+- `202 analyzing` as a reserved route state
+- Phase 8 as a stub with a fixed interface and evaluation plan
 
-**Mehrspuriges Material** (im Dienst von Phase 9):
+**Multi-track Material** (in service of Phase 9):
 
-- Entscheidung 6: ein Plan, N Spuren — `apply_plan(plan, track)`
-- `Stem`/`StemSet` außerhalb von `Score`, damit der Score serialisierbar
-  und der Analyzer rein testbar bleibt
-- Fallstrick „Stems liegen nicht zwangsläufig sample-genau"
-- Material-Herkunft nach Sidecar-Muster, ausdrücklich **ohne** zweiten
-  Audio-Input am Node
-- `score/naming.py` mit Seed-Ableitung, schon in Phase 6 nutzbar
+- Decision 6: one plan, N tracks—`apply_plan(plan, track)`
+- `Stem`/`StemSet` outside `Score`, keeping the Score serializable and the
+  analyzer purely testable
+- The “Stems are not necessarily sample-aligned” pitfall
+- Material sources following the sidecar pattern, explicitly **without** a
+  second audio input on the node
+- `score/naming.py` with seed derivation, already usable in Phase 6
 
-**Abgleich mit dem Repo** (im Dienst der Genauigkeit), Stand Branch
-`feature/css-theme-foundation-v0.2.0`:
+**Reconciliation with the repository** (in service of accuracy), branch
+state `feature/css-theme-foundation-v0.2.0`:
 
-- Entscheidung 2 betrifft **vierzehn** Funktionen, nicht sechs. Die
-  mathematische Wurzel liegt in `js/musical_grid.js`; die Integration
-  betrifft zusätzlich mehrere Stellen in `js/musical_audio_ui.js`. Python ist
-  nicht betroffen.
-- Route und Cache folgen `waveform_routes.py` statt eigenem Konzept
-- Lizenz ist GPL-3.0, damit ist der Essentia-Punkt entschärft, aber nicht
-  gegenstandslos
-- `VALIDATE_INPUTS`: das `**kwargs` ist der Fehler, nicht das `return True`
-- Zeilennummern der drei `except:` (63, 76, 208), Frontend 2308 statt 2274
-- Repo ist flach; `score/` und `material/` als Pakete sind eine benannte
-  Entscheidung, keine Fortsetzung des Bestands
+- Decision 2 affects **fourteen** functions, not six. The mathematical root
+  lies in `js/musical_grid.js`; integration additionally affects several
+  places in `js/musical_audio_ui.js`. Python is unaffected.
+- Route and cache follow `waveform_routes.py` rather than a separate concept
+- The license is GPL-3.0; this reduces, but does not eliminate, the Essentia
+  concern
+- `VALIDATE_INPUTS`: `**kwargs` is the problem, not `return True`
+- Line numbers of the three `except:` clauses (63, 76, 208), frontend 2308
+  rather than 2274
+- The repository is flat; introducing `score/` and `material/` packages is a
+  named decision, not a continuation of the existing layout
 
-**Verifiziert und unverändert übernommen:** kein `IS_CHANGED` vorhanden;
-Silence-Fallback an zwei Stellen, beide nur mit `print`; `duration` sowohl
-Widget als auch `RETURN_NAMES`-Eintrag; `start_beat` und `beats_per_bar` ohne
-Maximum.
+**Verified and carried over unchanged:** no `IS_CHANGED` exists; there are
+two silence fallbacks, both using only `print`; `duration` is both a widget
+and a `RETURN_NAMES` entry; `start_beat` and `beats_per_bar` have no maximum.
 
-**Waveform-Editor** (Strang B, neu, Stand `604e5ab`):
+**Waveform Editor** (strand B, new, state `604e5ab`):
 
-- fünf offene Schritte als paralleler Strang, verzahnt statt eingereiht
-- Transportfassade `node._musicalAudioTransport` statt rohem `audioEl`,
-  vorgezogen nach Schritt 2
-- Registrierung der Playhead-rAF-Schleife im bestehenden `runtime`-Objekt
-- `TimeAxis`-Fassade statt Wartezwang auf Phase 3
-- Score-Inspector, Section-Navigation und `Follow playhead` als Ausblick
+- Five open steps as a parallel strand, interleaved rather than appended
+- Transport facade `node._musicalAudioTransport` instead of raw `audioEl`,
+  moved forward to after Step 2
+- Registration of the playhead rAF loop in the existing `runtime` object
+- `TimeAxis` facade rather than being forced to wait for Phase 3
+- Score inspector, Section navigation, and `Follow playhead` as an outlook
 
-**Verbindliche Semantik** (S1–S10, neues Kapitel vor dem Dateilayout):
+**Binding semantics** (S1–S10, new chapter before the file layout):
 
-- S1 `ResolvedScore` mit `audio_seconds_at_tick_zero`; `downbeat_offset` füllt
-  die Rolle bereits
-- S2 Integer-Ticks plus geteilte Rundungsregel statt `Fraction`
-- S3 Meterwechsel im Takt, plus Parserdefaults für Tempo, Taktart,
-  Doppel-Events, Multi-Track-Merge und SMPTE
-- S4 Sections kanonisch neben Markern; Taktangaben nur abgeleitet
-- S5 halboffene Intervalle, `end_frame_exclusive`
-- S6 `sample_index` statt „Frame" für Audiopositionen
-- S7 `ProviderResult` mit `not_applicable` / `found` / `invalid`
-- S8 `bar_starts` abgeleitet, bis zur Audiodauer, `tick_to_position` O(log n)
-- S9 Cache-Fingerprint über Konfiguration, nicht nur mtime
-- S10 sprachübergreifendes Golden-Korpus
+- S1 `ResolvedScore` with `audio_seconds_at_tick_zero`; `downbeat_offset`
+  already fills the role
+- S2 integer ticks plus a shared rounding rule instead of `Fraction`
+- S3 meter changes inside a bar, plus parser defaults for tempo, meter,
+  duplicate events, multi-track merge, and SMPTE
+- S4 canonical Sections alongside markers; bar values derived only
+- S5 half-open intervals, `end_frame_exclusive`
+- S6 `sample_index` instead of “frame” for audio positions
+- S7 `ProviderResult` with `not_applicable` / `found` / `invalid`
+- S8 derived `bar_starts`, extended to audio duration,
+  `tick_to_position` O(log n)
+- S9 cache fingerprint over configuration, not only mtime
+- S10 cross-language golden corpus
 
-**Präzisierungen nach dem zweiten Review:**
+**Clarifications after the second review:**
 
-- S1 Vorzeichengleichung, am Repo verifiziert: `audio_seconds_at_tick_zero
-  == downbeat_offset`
-- S2 absolute statt kumulative Rundung; Ablehnung zu feiner Raster
-- S10 Roundtrip nur von der Positionsseite, plus Monotonie
-- `ScoreFormat` und `ProviderKind` getrennt
-- `has_variable_meter` als berechnetes Feld, Feature-Gate hängt daran
-- Route auf `/comfyui-musical-audio/score` mit vollständigem Payload
-- Lineal-Designfrage geschlossen: zeitproportional
-- Analyzer-Evaluation mit Precision/Recall/F1 statt mittlerer Distanz
-- Output-Umbenennung als Vertragsänderung mit eigenem Commit
-- redaktionelle Reste bereinigt: `musical_position` → `diagnostics`,
-  Frames → Sampleindizes, Marker → Sectiongrenzen
+- S1 sign equation, verified against the repository:
+  `audio_seconds_at_tick_zero == downbeat_offset`
+- S2 absolute rather than cumulative rounding; rejection of over-fine grids
+- S10 round trip only from the position side, plus monotonicity
+- `ScoreFormat` and `ProviderKind` separated
+- `has_variable_meter` as a calculated field on which the feature gate depends
+- Route at `/comfyui-musical-audio/score` with the complete payload
+- Ruler design question closed: time-proportional
+- Analyzer evaluation with Precision/Recall/F1 rather than mean distance
+- Output rename as a contract change with its own commit
+- Editorial remnants cleaned up: `musical_position` → `diagnostics`, frames →
+  sample indices, markers → Section boundaries
 
-**Dritte Selbstkorrektur:** Phase 4 war als „ab hier stimmt das Timing"
-beschrieben. Bei aktiver Meter-Map schreibt das alte Frontend falsche
-Selektionswerte zurück — das ist nicht kosmetisch. Feature-Gate ergänzt.
-- Sections als Band unter dem Lineal, nicht in der Toolbar
+**Third self-correction:** Phase 4 was described as “from here onward, timing
+is correct.” With an active meter map, the old frontend writes incorrect
+selection values back—that is not cosmetic. The feature gate was added.
+- Sections as a band beneath the ruler, not in the toolbar
 
-**Zwei Korrekturen an der vorherigen Revision** — beide waren zu optimistisch:
+**Two corrections to the previous revision**—both were too optimistic:
 
-- Entscheidung 2 betrifft vierzehn Funktionen, nicht sechs. Die mathematische
-  Wurzel liegt in `js/musical_grid.js`; die Integration betrifft zusätzlich
-  mehrere Stellen in `js/musical_audio_ui.js`. Python ist nicht betroffen.
-- Das `duration`-Widget ist nicht tot. Acht Fundstellen im Frontend, davon
-  eine in der Seconds-Synchronisation. In Phase 0 nur den Output umbenennen.
+- Decision 2 affects fourteen functions, not six. The mathematical root is in
+  `js/musical_grid.js`; integration additionally affects several places in
+  `js/musical_audio_ui.js`. Python is unaffected.
+- The `duration` widget is not dead. Eight occurrences in the frontend, one
+  of them in Seconds synchronization. In Phase 0, rename only the output.
 
-- `docs/` mit beiden Specs, per `git mv`, ohne Inhaltsänderung
-- README-Links auf beide — die gibt es bisher nicht
-- Rangfolge normativ/beschreibend zwischen Spec und README festgeschrieben
-- drei belegte Widersprüche: veraltete Waveform-Limitation, uneinheitliche
-  Versionsangaben, fehlender Status-Header in `AUDIO_INTEGRATION_SPEC.md`
+- `docs/` with both specifications, using `git mv`, without content changes
+- README links to both—they do not exist yet
+- Normative/descriptive precedence between specification and README defined
+- Three verified contradictions: stale waveform limitation, inconsistent
+  version references, missing status header in `AUDIO_INTEGRATION_SPEC.md`

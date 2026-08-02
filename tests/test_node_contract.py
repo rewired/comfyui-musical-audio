@@ -397,22 +397,35 @@ class StaticNodeContractTests(unittest.TestCase):
         source = SCORE_SUBSYSTEM.read_text(encoding="utf-8")
         self.assertEqual(
             hashlib.sha256(SCORE_SUBSYSTEM.read_bytes()).hexdigest().upper(),
-            "9539B0E9149D45A806C54765835C4F759E96125C470B094CE72FF0FF8E6A036B",
+            "8861C0914E2E81BE56D27256606FBCEBCEC155C7D86BA276C1815F4258DEBB91",
         )
 
         for marker in (
             "Status: Architecture frozen for implementation",
             "Revision: 1",
             "604e5ab",
+            "Ticks are the canonical unit, not seconds",
+            "The linear subdivision index must go",
+            "The bar table is precomputed",
+            "Backward compatibility is the test contract",
+            "Score sources form a chain, not a special case",
+            "The plan is single-track; the material is multi-track",
             "ScoreFormat",
             "ProviderKind",
             "ResolvedScore",
             "audio_seconds_at_tick_zero",
-            "Gerundet wird absolut, nie kumulativ.",
+            "Rounding is absolute, never cumulative.",
+            "Sections are canonical; markers are raw data",
+            "All intervals are half-open",
             "ProviderResult",
+            "Providers report three states",
+            "The cache fingerprint includes configuration",
+            "Python and JavaScript share a golden corpus",
             "end_frame_exclusive",
             "/comfyui-musical-audio/score",
-            "Feature-Gate für variable Meter",
+            "Feature gate for variable meter",
+            "There is no partially active Score mode.",
+            "The modal ruler must not be built directly on the linear subdivision index.",
             "has_variable_meter",
             "has_midbar_meter_change",
         ):
