@@ -29,6 +29,10 @@ import {
     parseLocalizedDecimal,
 } from "./numeric_input.js";
 import { createWaveformPeakLoader } from "./waveform_loader.js";
+import {
+    clearWaveformCanvas,
+    renderWaveformCanvas,
+} from "./waveform_renderer.js";
 
 const HIDDEN_WIDGETS = [
     "audioUI",
@@ -393,6 +397,9 @@ app.registerExtension({
         nodeType.prototype.onRemoved = function () {
             this._musicalAudioRemoved = true;
             this._musicalAudioExternalRefreshPending = false;
+            if (this.destroyMusicalAudioWaveformRenderer) {
+                this.destroyMusicalAudioWaveformRenderer();
+            }
             if (this.destroyMusicalAudioWaveformData) {
                 this.destroyMusicalAudioWaveformData();
             }
@@ -456,6 +463,7 @@ app.registerExtension({
                 fetchResponse: (path, requestOptions) => api.fetchApi(path, requestOptions),
                 onStateChange: (state) => {
                     node._musicalAudioWaveformState = state;
+                    node.scheduleMusicalAudioWaveformRender?.();
                 },
             });
             node._musicalAudioWaveformState = waveformLoader.getState();
@@ -793,8 +801,10 @@ app.registerExtension({
             timelineContent.appendChild(timeRuler);
 
             const sliderBox = makeElement("div", "musical-audio-ui__timeline");
+            const waveformCanvas = makeElement("canvas", "musical-audio-ui__waveform");
+            waveformCanvas.setAttribute("aria-hidden", "true");
             const fill = makeElement("div", "musical-audio-ui__selection");
-            sliderBox.appendChild(fill);
+            sliderBox.append(waveformCanvas, fill);
 
             const startHandle = makeElement(
                 "div",
@@ -868,6 +878,76 @@ app.registerExtension({
                 const nodeWidth = node.size?.[0] ?? width ?? 475;
                 return [Math.max(10, nodeWidth - 30), Math.max(180, domWidget._contentHeight)];
             };
+
+            const waveformRenderer = {
+                animationFrameId: null,
+                canvas: waveformCanvas,
+                destroyed: false,
+                resizeObserver: null,
+            };
+            node._musicalAudioWaveformRenderer = waveformRenderer;
+            node.renderMusicalAudioWaveform = () => {
+                const runtime = node._musicalAudioWaveformRenderer;
+                if (!runtime || runtime.destroyed || !runtime.canvas) return null;
+                const waveformState = node.getMusicalAudioWaveformState?.()
+                    ?? node._musicalAudioWaveformState;
+                if (!waveformState?.pyramid) {
+                    return clearWaveformCanvas(runtime.canvas);
+                }
+                try {
+                    return renderWaveformCanvas(runtime.canvas, waveformState.pyramid, {
+                        startSeconds: 0,
+                        endSeconds: waveformState.pyramid.durationSeconds,
+                    });
+                } catch {
+                    try {
+                        clearWaveformCanvas(runtime.canvas);
+                    } catch {
+                        // A malformed runtime Canvas must not break the remaining node UI.
+                    }
+                    return null;
+                }
+            };
+            node.scheduleMusicalAudioWaveformRender = () => {
+                const runtime = node._musicalAudioWaveformRenderer;
+                if (
+                    !runtime
+                    || runtime.destroyed
+                    || node._musicalAudioRemoved
+                    || runtime.animationFrameId !== null
+                ) return;
+                runtime.animationFrameId = requestAnimationFrame(() => {
+                    const currentRuntime = node._musicalAudioWaveformRenderer;
+                    if (!currentRuntime || currentRuntime !== runtime) return;
+                    currentRuntime.animationFrameId = null;
+                    if (currentRuntime.destroyed || node._musicalAudioRemoved) return;
+                    node.renderMusicalAudioWaveform();
+                });
+            };
+            node.destroyMusicalAudioWaveformRenderer = () => {
+                const runtime = node._musicalAudioWaveformRenderer;
+                if (!runtime || runtime.destroyed) return;
+                runtime.destroyed = true;
+                if (runtime.animationFrameId !== null) {
+                    cancelAnimationFrame(runtime.animationFrameId);
+                    runtime.animationFrameId = null;
+                }
+                runtime.resizeObserver?.disconnect();
+                runtime.resizeObserver = null;
+                if (runtime.canvas) {
+                    runtime.canvas.width = 0;
+                    runtime.canvas.height = 0;
+                    runtime.canvas = null;
+                }
+                node._musicalAudioWaveformRenderer = null;
+            };
+            if (typeof ResizeObserver === "function") {
+                waveformRenderer.resizeObserver = new ResizeObserver(() => {
+                    node.scheduleMusicalAudioWaveformRender?.();
+                });
+                waveformRenderer.resizeObserver.observe(sliderBox);
+            }
+            node.scheduleMusicalAudioWaveformRender();
 
             let heightSyncQueued = false;
             let heightSyncUpdating = false;
@@ -2152,6 +2232,7 @@ app.registerExtension({
                         node._shouldResetSecondsTrim = false;
                     }
                     refreshUI(false, true, true);
+                    node.scheduleMusicalAudioWaveformRender?.();
                     dirtyGraph(false);
                     if (!audioEl.paused) void reconcileMusicalAudioMetronome();
                 });
@@ -2160,6 +2241,7 @@ app.registerExtension({
                         audioDuration = audioEl.duration;
                         lastRulerKey = "";
                         refreshUI(false, false);
+                        node.scheduleMusicalAudioWaveformRender?.();
                         if (!audioEl.paused) void reconcileMusicalAudioMetronome();
                     }
                 });
@@ -2292,6 +2374,7 @@ app.registerExtension({
                     const state = resolveSelection();
                     renderRuler(state);
                     renderSelection(state);
+                    node.scheduleMusicalAudioWaveformRender?.();
                 };
 
                 updateAudioSource();
