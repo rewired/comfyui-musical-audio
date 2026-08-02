@@ -1,4 +1,4 @@
-"""Execution-contract tests for local and externally supplied timing values."""
+"""Execution-contract tests for audio fallbacks and timing inputs."""
 
 from contextlib import redirect_stdout
 import importlib.util
@@ -35,28 +35,40 @@ EXTERNAL_TIMING_VALUES = {
 
 
 class FakeTensor:
-    """Small tensor stand-in covering the silence and slice return path."""
+    """Small tensor stand-in covering silence, slicing, and batching."""
 
     def __init__(self, shape: tuple[int, ...]) -> None:
         self.shape = shape
 
-    def __getitem__(self, _key: object) -> "FakeTensor":
-        return self
+    def __getitem__(self, key: object) -> "FakeTensor":
+        if (
+            isinstance(key, tuple)
+            and len(key) == 2
+            and isinstance(key[1], slice)
+        ):
+            start = 0 if key[1].start is None else key[1].start
+            stop = self.shape[-1] if key[1].stop is None else key[1].stop
+            return FakeTensor((self.shape[0], max(0, stop - start)))
+        return FakeTensor(self.shape)
 
-    def unsqueeze(self, _dimension: int) -> "FakeTensor":
-        return self
+    def unsqueeze(self, dimension: int) -> "FakeTensor":
+        shape = list(self.shape)
+        shape.insert(dimension, 1)
+        return FakeTensor(tuple(shape))
 
 
 def _load_node_module(planner: object) -> ModuleType:
     folder_paths = ModuleType("folder_paths")
     folder_paths.get_filename_list = lambda _kind: ["fixture.wav"]  # type: ignore[attr-defined]
     folder_paths.get_input_directory = lambda: str(REPO_ROOT)  # type: ignore[attr-defined]
-    folder_paths.get_annotated_filepath = lambda _name: ""  # type: ignore[attr-defined]
+    folder_paths.get_annotated_filepath = lambda _name: str(  # type: ignore[attr-defined]
+        REPO_ROOT / "fixture.wav"
+    )
     folder_paths.filter_files_content_types = lambda files, _types: files  # type: ignore[attr-defined]
 
     torch = ModuleType("torch")
     torch.Tensor = FakeTensor  # type: ignore[attr-defined]
-    torch.zeros = lambda shape: FakeTensor(shape)  # type: ignore[attr-defined]
+    torch.zeros = Mock(side_effect=lambda shape: FakeTensor(shape))  # type: ignore[attr-defined]
     torch.int16 = object()  # type: ignore[attr-defined]
     torch.int32 = object()  # type: ignore[attr-defined]
 
@@ -84,26 +96,34 @@ def _load_node_module(planner: object) -> ModuleType:
     return module
 
 
-def _plan() -> SimpleNamespace:
-    return SimpleNamespace(
-        start_sample=11,
-        end_sample=29,
-        duration_seconds=0.75,
-        start_seconds=0.25,
-        end_seconds=1.0,
-        start_frame=6,
-        frame_count=18,
-        seconds_per_beat=0.3463203463203463,
-        frames_per_beat=8.303030303030303,
-        seconds_per_bar=1.3852813852813852,
-        frames_per_bar=33.21212121212121,
-        musical_position="Bar 1 · Beat 1 · Subdivision 0",
-    )
+def _plan(**overrides: object) -> SimpleNamespace:
+    values = {
+        "start_sample": 11,
+        "end_sample": 29,
+        "duration_seconds": 0.75,
+        "start_seconds": 0.25,
+        "end_seconds": 1.0,
+        "start_frame": 6,
+        "frame_count": 18,
+        "seconds_per_beat": 0.3463203463203463,
+        "frames_per_beat": 8.303030303030303,
+        "seconds_per_bar": 1.3852813852813852,
+        "frames_per_bar": 33.21212121212121,
+        "musical_position": "Bar 1 · Beat 1 · Subdivision 0",
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
 
 
-def _load_audio(module: ModuleType, **overrides: object) -> tuple[object, ...]:
+def _run_load_audio(
+    module: ModuleType,
+    *,
+    path_exists: bool = True,
+    decode_error: Exception | None = None,
+    **overrides: object,
+) -> SimpleNamespace:
     inputs = {
-        "audio": "none",
+        "audio": "fixture.wav",
         "start_time": 0.0,
         "end_time": 1.0,
         "duration": 1.0,
@@ -118,8 +138,23 @@ def _load_audio(module: ModuleType, **overrides: object) -> tuple[object, ...]:
         "snap_mode": "Off",
     }
     inputs.update(overrides)
-    with redirect_stdout(io.StringIO()):
-        return module.MusicalLoadAudioUI().load_audio(**inputs)
+    decoder = Mock(
+        return_value=(FakeTensor((2, 96_000)), 48_000),
+        side_effect=decode_error,
+    )
+    stdout = io.StringIO()
+    module.torch.zeros.reset_mock()
+    with (
+        patch.object(module.os.path, "exists", return_value=path_exists),
+        patch.object(module, "load_audio_file", decoder),
+        redirect_stdout(stdout),
+    ):
+        result = module.MusicalLoadAudioUI().load_audio(**inputs)
+    return SimpleNamespace(result=result, stdout=stdout.getvalue(), decoder=decoder)
+
+
+def _load_audio(module: ModuleType, **overrides: object) -> tuple[object, ...]:
+    return _run_load_audio(module, **overrides).result
 
 
 class LoadAudioOutputContractTests(unittest.TestCase):
@@ -130,11 +165,12 @@ class LoadAudioOutputContractTests(unittest.TestCase):
         result = _load_audio(module)
 
         self.assertEqual(len(result), 14)
-        self.assertEqual(result[0]["sample_rate"], 44_100)
+        self.assertEqual(result[0]["sample_rate"], 48_000)
         self.assertIsInstance(result[0]["waveform"], FakeTensor)
+        self.assertEqual(result[0]["waveform"].shape, (1, 2, 18))
         self.assertEqual(result[1:12], (
             plan.duration_seconds,
-            "",
+            "fixture.wav",
             plan.start_seconds,
             plan.end_seconds,
             plan.start_frame,
@@ -239,6 +275,205 @@ class LoadAudioOutputContractTests(unittest.TestCase):
             with self.subTest(external_name=external_name):
                 with self.assertRaises((TypeError, ValueError)):
                     _load_audio(module, **{external_name: invalid_value})
+
+    def test_successful_decode_preserves_musical_position_and_has_no_warning(self) -> None:
+        plan = _plan(musical_position="Bar 12 · Beat 3 · Subdivision 2")
+        planner = Mock(return_value=plan)
+        module = _load_node_module(planner)
+
+        run = _run_load_audio(module)
+
+        self.assertEqual(run.result[11], plan.musical_position)
+        self.assertNotIn("WARNING", run.result[11])
+        self.assertEqual(run.result[2], "fixture.wav")
+        self.assertEqual(run.stdout, "")
+        run.decoder.assert_called_once_with(str(REPO_ROOT / "fixture.wav"))
+        module.torch.zeros.assert_not_called()
+
+    def test_no_selection_reports_warning_and_one_second_stereo_silence(self) -> None:
+        plan = _plan(start_sample=0, end_sample=44_100, duration_seconds=1.0)
+        planner = Mock(return_value=plan)
+        module = _load_node_module(planner)
+
+        run = _run_load_audio(module, audio="none")
+
+        self.assertEqual(len(run.result), 14)
+        self.assertIn("WARNING", run.result[11])
+        self.assertIn("no file selected", run.result[11])
+        self.assertIn("using 1 second of silence", run.result[11])
+        self.assertIn("Outputting 1 second of silence", run.stdout)
+        self.assertEqual(run.result[0]["sample_rate"], 44_100)
+        self.assertEqual(run.result[0]["waveform"].shape, (1, 2, 44_100))
+        self.assertEqual(run.result[2], "")
+        module.torch.zeros.assert_called_once_with((2, 44_100))
+        planner.assert_called_once()
+
+    def test_unresolved_selection_reports_the_exact_audio_value(self) -> None:
+        planner = Mock(return_value=_plan())
+        module = _load_node_module(planner)
+        selected_audio = "stale/DAW export.wav"
+
+        with patch.object(
+            module.folder_paths,
+            "get_annotated_filepath",
+            side_effect=RuntimeError("cannot resolve"),
+        ):
+            run = _run_load_audio(module, audio=selected_audio)
+
+        self.assertIn("WARNING", run.result[11])
+        self.assertIn(selected_audio, run.result[11])
+        self.assertIn("path could not be resolved", run.result[11])
+        self.assertIn("using 1 second of silence", run.result[11])
+        self.assertIn(selected_audio, run.stdout)
+        self.assertEqual(run.result[2], "")
+        run.decoder.assert_not_called()
+        planner.assert_called_once()
+
+    def test_missing_file_reports_the_exact_audio_value(self) -> None:
+        planner = Mock(return_value=_plan())
+        module = _load_node_module(planner)
+        selected_audio = "missing/song.wav"
+
+        run = _run_load_audio(
+            module,
+            audio=selected_audio,
+            path_exists=False,
+        )
+
+        self.assertIn("WARNING", run.result[11])
+        self.assertIn(selected_audio, run.result[11])
+        self.assertIn("file not found", run.result[11])
+        self.assertIn("using 1 second of silence", run.result[11])
+        self.assertIn(selected_audio, run.stdout)
+        self.assertEqual(run.result[2], "")
+        run.decoder.assert_not_called()
+        planner.assert_called_once()
+
+    def test_decode_failure_reports_class_message_and_remains_single_line(self) -> None:
+        planner = Mock(return_value=_plan())
+        module = _load_node_module(planner)
+        decode_error = RuntimeError("decoder exploded\nsecond line")
+
+        run = _run_load_audio(module, decode_error=decode_error)
+
+        self.assertIn("WARNING", run.result[11])
+        self.assertIn("fixture.wav", run.result[11])
+        self.assertIn("decode failed", run.result[11])
+        self.assertIn("RuntimeError", run.result[11])
+        self.assertIn("decoder exploded second line", run.result[11])
+        self.assertIn("using 1 second of silence", run.result[11])
+        self.assertNotIn("\n", run.result[11])
+        self.assertNotIn("\r", run.result[11])
+        self.assertIn("Error decoding fixture.wav", run.stdout)
+        self.assertEqual(run.result[0]["sample_rate"], 44_100)
+        self.assertEqual(run.result[2], "fixture.wav")
+        module.torch.zeros.assert_called_once_with((2, 44_100))
+        planner.assert_called_once()
+
+    def test_decode_failure_exception_text_is_bounded(self) -> None:
+        planner = Mock(return_value=_plan())
+        module = _load_node_module(planner)
+
+        run = _run_load_audio(
+            module,
+            decode_error=ValueError("x" * 1_000),
+        )
+
+        self.assertLess(len(run.result[11]), 400)
+        self.assertIn("ValueError", run.result[11])
+        self.assertIn("...", run.result[11])
+
+    def test_start_beat_is_clamped_only_at_the_upper_bar_boundary(self) -> None:
+        cases = (
+            ("below", 3, 4, 3),
+            ("equal", 4, 4, 4),
+            ("above", 7, 4, 4),
+        )
+
+        for label, start_beat, beats_per_bar, expected in cases:
+            with self.subTest(label=label):
+                planner = Mock(return_value=_plan())
+                module = _load_node_module(planner)
+
+                _load_audio(
+                    module,
+                    start_beat=start_beat,
+                    beats_per_bar=beats_per_bar,
+                )
+
+                self.assertEqual(planner.call_args.kwargs["start_beat"], expected)
+                self.assertEqual(
+                    planner.call_args.kwargs["beats_per_bar"],
+                    beats_per_bar,
+                )
+
+    def test_external_beats_per_bar_controls_start_beat_clamping(self) -> None:
+        cases = (
+            (3, 3),
+            (80, 7),
+        )
+
+        for external_beats_per_bar, expected_start_beat in cases:
+            with self.subTest(external_beats_per_bar=external_beats_per_bar):
+                planner = Mock(return_value=_plan())
+                module = _load_node_module(planner)
+
+                _load_audio(
+                    module,
+                    start_beat=7,
+                    beats_per_bar=4,
+                    beats_per_bar_input=external_beats_per_bar,
+                )
+
+                planning_inputs = planner.call_args.kwargs
+                self.assertEqual(
+                    planning_inputs["beats_per_bar"],
+                    external_beats_per_bar,
+                )
+                self.assertEqual(
+                    planning_inputs["start_beat"],
+                    expected_start_beat,
+                )
+
+    def test_invalid_external_beats_per_bar_reaches_timing_validation(self) -> None:
+        module = _load_node_module(real_create_audio_clip_plan)
+
+        with self.assertRaises(ValueError):
+            _load_audio(module, start_beat=7, beats_per_bar_input=0)
+
+    def test_invalid_start_beat_or_meter_types_are_not_coerced(self) -> None:
+        cases = (
+            ("7", 4),
+            (True, 4),
+            (7, "4"),
+        )
+
+        for start_beat, beats_per_bar in cases:
+            with self.subTest(start_beat=start_beat, beats_per_bar=beats_per_bar):
+                planner = Mock(return_value=_plan())
+                module = _load_node_module(planner)
+
+                _load_audio(
+                    module,
+                    start_beat=start_beat,
+                    beats_per_bar_input=beats_per_bar,
+                )
+
+                self.assertIs(planner.call_args.kwargs["start_beat"], start_beat)
+                self.assertIs(
+                    planner.call_args.kwargs["beats_per_bar"],
+                    beats_per_bar,
+                )
+
+    def test_start_beat_argument_is_not_mutated(self) -> None:
+        start_beat = 7
+        planner = Mock(return_value=_plan())
+        module = _load_node_module(planner)
+
+        _load_audio(module, start_beat=start_beat, beats_per_bar=4)
+
+        self.assertEqual(start_beat, 7)
+        self.assertEqual(planner.call_args.kwargs["start_beat"], 4)
 
 
 if __name__ == "__main__":

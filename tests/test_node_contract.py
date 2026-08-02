@@ -8,6 +8,8 @@ import unittest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 NODE_SOURCE = REPO_ROOT / "musical_audio_ui.py"
+INIT_SOURCE = REPO_ROOT / "__init__.py"
+SCORE_SUBSYSTEM = REPO_ROOT / "SCORE_SUBSYSTEM.md"
 FRONTEND_SOURCE = REPO_ROOT / "js" / "musical_audio_ui.js"
 FRONTEND_STYLESHEET = REPO_ROOT / "js" / "musical_audio_ui.css"
 
@@ -54,7 +56,7 @@ EXPECTED_TARGET_WIDGET_SPECS = {
     "bpm": ("FLOAT", {"default": 120.0, "min": 0.01, "step": 0.01, "socketless": True}),
     "tempo_unit": (["Quarter", "Eighth", "Dotted Quarter"], {"default": "Quarter", "socketless": True}),
     "fps": ("FLOAT", {"default": 24.0, "min": 0.001, "step": 0.001, "socketless": True}),
-    "beats_per_bar": ("INT", {"default": 4, "min": 1, "socketless": True}),
+    "beats_per_bar": ("INT", {"default": 4, "min": 1, "max": 64, "socketless": True}),
     "beat_unit": ("INT", {"default": 4, "min": 1, "socketless": True}),
     "subdivisions_per_beat": ("INT", {"default": 4, "min": 1, "socketless": True}),
     "downbeat_offset": (
@@ -126,6 +128,33 @@ def _class_method(name: str) -> ast.FunctionDef:
     raise AssertionError(f"{name} method was not found")
 
 
+def _module_literal(name: str) -> object:
+    tree = ast.parse(NODE_SOURCE.read_text(encoding="utf-8"))
+    for statement in tree.body:
+        if isinstance(statement, ast.Assign):
+            if any(
+                isinstance(target, ast.Name) and target.id == name
+                for target in statement.targets
+            ):
+                return ast.literal_eval(statement.value)
+    raise AssertionError(f"{name} module assignment was not found")
+
+
+def _static_literal(node: ast.expr) -> object:
+    if isinstance(node, ast.Name):
+        return _module_literal(node.id)
+    if isinstance(node, ast.Tuple):
+        return tuple(_static_literal(element) for element in node.elts)
+    if isinstance(node, ast.List):
+        return [_static_literal(element) for element in node.elts]
+    if isinstance(node, ast.Dict):
+        return {
+            _static_literal(key): _static_literal(value)
+            for key, value in zip(node.keys, node.values)
+        }
+    return ast.literal_eval(node)
+
+
 def _input_group(group_name: str) -> dict[str, ast.expr]:
     input_types = _class_method("INPUT_TYPES")
     return_node = next(
@@ -152,14 +181,17 @@ def _required_widget_names() -> tuple[str, ...]:
 
 
 def _required_input_spec(name: str) -> object:
-    return ast.literal_eval(_input_group("required")[name])
+    return _static_literal(_input_group("required")[name])
 
 
 def _input_options(group_name: str, name: str) -> dict[str, object]:
     spec = _input_group(group_name)[name]
     if not isinstance(spec, ast.Tuple) or len(spec.elts) < 2:
         return {}
-    return ast.literal_eval(spec.elts[1])
+    options = _static_literal(spec.elts[1])
+    if not isinstance(options, dict):
+        raise AssertionError(f"{name} input options must be a dictionary")
+    return options
 
 
 class StaticNodeContractTests(unittest.TestCase):
@@ -202,6 +234,21 @@ class StaticNodeContractTests(unittest.TestCase):
         for widget_name, expected_spec in EXPECTED_TARGET_WIDGET_SPECS.items():
             with self.subTest(widget_name=widget_name):
                 self.assertEqual(_required_input_spec(widget_name), expected_spec)
+
+    def test_local_beat_widgets_use_the_named_practical_limit(self) -> None:
+        self.assertEqual(_module_literal("MAX_LOCAL_BEATS_PER_BAR"), 64)
+        self.assertEqual(
+            _required_input_spec("beats_per_bar"),
+            ("INT", {"default": 4, "min": 1, "max": 64, "socketless": True}),
+        )
+        self.assertEqual(
+            _required_input_spec("start_beat"),
+            ("INT", {"default": 1, "min": 1, "max": 64, "socketless": True}),
+        )
+        self.assertEqual(
+            ast.literal_eval(_input_group("optional")["beats_per_bar_input"]),
+            ("INT", {"forceInput": True}),
+        )
 
     def test_downbeat_offset_has_explicit_signed_local_range_only(self) -> None:
         input_type, options = _required_input_spec("downbeat_offset")
@@ -268,6 +315,112 @@ class StaticNodeContractTests(unittest.TestCase):
                 *(external_name for external_name, _ in EXTERNAL_TIMING_INPUTS.values()),
             ),
         )
+
+    def test_validate_inputs_only_accepts_audio_and_returns_true(self) -> None:
+        method = _class_method("VALIDATE_INPUTS")
+
+        self.assertEqual(
+            tuple(argument.arg for argument in method.args.args),
+            ("cls", "audio"),
+        )
+        self.assertIsNone(method.args.vararg)
+        self.assertIsNone(method.args.kwarg)
+        self.assertEqual(method.args.kwonlyargs, [])
+        self.assertTrue(
+            any(
+                isinstance(decorator, ast.Name) and decorator.id == "classmethod"
+                for decorator in method.decorator_list
+            )
+        )
+        returns = [node for node in ast.walk(method) if isinstance(node, ast.Return)]
+        self.assertEqual(len(returns), 1)
+        self.assertIs(ast.literal_eval(returns[0].value), True)
+
+    def test_is_changed_is_a_classmethod_accepting_audio_and_extra_keywords(self) -> None:
+        method = _class_method("IS_CHANGED")
+
+        self.assertEqual(
+            tuple(argument.arg for argument in method.args.args),
+            ("cls", "audio"),
+        )
+        self.assertIsNotNone(method.args.kwarg)
+        self.assertEqual(method.args.kwarg.arg, "_kwargs")
+        self.assertTrue(
+            any(
+                isinstance(decorator, ast.Name) and decorator.id == "classmethod"
+                for decorator in method.decorator_list
+            )
+        )
+
+    def test_node_source_contains_no_bare_except_handler(self) -> None:
+        tree = ast.parse(NODE_SOURCE.read_text(encoding="utf-8"))
+        bare_handlers = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ExceptHandler) and node.type is None
+        ]
+
+        self.assertEqual(bare_handlers, [])
+
+    def test_duration_and_score_free_node_contract_remain_unchanged(self) -> None:
+        all_input_names = (*_input_group("required"), *_input_group("optional"))
+        return_names = _class_literal("RETURN_NAMES")
+
+        self.assertIn("duration", _input_group("required"))
+        self.assertIn("duration", return_names)
+        self.assertNotIn("diagnostics", return_names)
+        self.assertFalse(any("score" in name.lower() for name in all_input_names))
+        self.assertNotIn("score_file", all_input_names)
+        self.assertNotIn("stems_dir", all_input_names)
+        self.assertFalse(any("score" in name.lower() for name in return_names))
+
+        node_tree = ast.parse(NODE_SOURCE.read_text(encoding="utf-8"))
+        class_names = [
+            statement.name
+            for statement in node_tree.body
+            if isinstance(statement, ast.ClassDef)
+        ]
+        self.assertEqual(class_names, ["MusicalLoadAudioUI"])
+
+        init_source = INIT_SOURCE.read_text(encoding="utf-8")
+        self.assertIn('"MusicalLoadAudioUI": MusicalLoadAudioUI', init_source)
+        self.assertIn(
+            '"MusicalLoadAudioUI": "Load Audio UI — Musical Grid"',
+            init_source,
+        )
+
+    def test_frozen_score_document_preserves_core_markers(self) -> None:
+        self.assertTrue(SCORE_SUBSYSTEM.is_file())
+        source = SCORE_SUBSYSTEM.read_text(encoding="utf-8")
+
+        for marker in (
+            "Status: Architecture frozen for implementation",
+            "Revision: 1",
+            "604e5ab",
+            "ScoreFormat",
+            "ProviderKind",
+            "ResolvedScore",
+            "audio_seconds_at_tick_zero",
+            "Gerundet wird absolut, nie kumulativ.",
+            "ProviderResult",
+            "end_frame_exclusive",
+            "/comfyui-musical-audio/score",
+            "Feature-Gate für variable Meter",
+            "has_variable_meter",
+            "has_midbar_meter_change",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, source)
+
+        for number in range(1, 11):
+            with self.subTest(semantic_contract=number):
+                self.assertRegex(source, rf"(?m)^### S{number} — ")
+        for number in range(1, 7):
+            with self.subTest(architectural_decision=number):
+                self.assertRegex(source, rf"(?m)^### {number}\. ")
+
+        self.assertNotIn("ScoreSource", source)
+        self.assertNotIn("score_source", source)
 
     def test_frontend_maps_local_controls_to_backend_inputs_without_socket_creation(self) -> None:
         source = FRONTEND_SOURCE.read_text(encoding="utf-8")
