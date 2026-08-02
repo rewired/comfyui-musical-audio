@@ -1,16 +1,55 @@
 import folder_paths
+import json
+import math
 import os
 import torch
 import av
 
 try:
     from .audio_clip_plan import create_audio_clip_plan
+    from .score.providers import (
+        ANALYSIS_PROVIDER_CONTRACT,
+        BLANK_SCORE_FILE,
+        SCORE_FINGERPRINT_VERSION,
+        AnalysisProvider,
+        ConstantProvider,
+        ExplicitFileProvider,
+        MidiSidecarProvider,
+        ProviderChainError,
+        SidecarJsonProvider,
+        build_score_fingerprint,
+        derive_automatic_candidate_paths,
+        fingerprint_candidate,
+        resolve_provider_chain,
+        select_section,
+    )
+    from .score.resolver import ScoreResolver
+    from .score.tempo_map import ScoreTempoMap
 except ImportError:  # Support direct module loading outside the package.
     from audio_clip_plan import create_audio_clip_plan
+    from score.providers import (
+        ANALYSIS_PROVIDER_CONTRACT,
+        BLANK_SCORE_FILE,
+        SCORE_FINGERPRINT_VERSION,
+        AnalysisProvider,
+        ConstantProvider,
+        ExplicitFileProvider,
+        MidiSidecarProvider,
+        ProviderChainError,
+        SidecarJsonProvider,
+        build_score_fingerprint,
+        derive_automatic_candidate_paths,
+        fingerprint_candidate,
+        resolve_provider_chain,
+        select_section,
+    )
+    from score.resolver import ScoreResolver
+    from score.tempo_map import ScoreTempoMap
 
 
 _EXTERNAL_INPUT_MISSING = object()
 MAX_LOCAL_BEATS_PER_BAR = 64
+_AUTOMATIC_SCORE_UNAVAILABLE = ("automatic_score_candidate", "unavailable")
 
 
 def external_or_local(external_value, local_value):
@@ -30,12 +69,154 @@ def _resolve_audio_path(audio):
     return audio_path or None, None
 
 
+def _resolve_score_path(score_file):
+    """Resolve a nonblank explicit Score selection at the ComfyUI boundary."""
+    if type(score_file) is not str:
+        raise TypeError("score_file must be a built-in string")
+    if not score_file.strip():
+        return None, None
+
+    try:
+        score_path = folder_paths.get_annotated_filepath(score_file)
+    except Exception as error:
+        return None, error
+    if not score_path:
+        return None, ValueError("score_file resolved to no path")
+    return score_path, None
+
+
+def _audio_dependency_fingerprint(audio):
+    """Return the historical audio identity together with its resolved path."""
+    if audio == "none":
+        return ("none", "none"), None
+
+    audio_path, resolution_error = _resolve_audio_path(audio)
+    if resolution_error is not None or audio_path is None:
+        return ("unresolved", audio), None
+
+    try:
+        normalized_path = os.path.normcase(
+            os.path.abspath(os.path.normpath(os.fspath(audio_path)))
+        )
+    except (OSError, TypeError, ValueError):
+        return ("unresolved", audio), None
+
+    try:
+        file_stat = os.stat(normalized_path)
+    except (OSError, ValueError):
+        return ("missing", audio, normalized_path), audio_path
+
+    return (
+        "file",
+        audio,
+        normalized_path,
+        file_stat.st_size,
+        file_stat.st_mtime_ns,
+    ), audio_path
+
+
+def _unavailable_score_fingerprint(score_file, explicit_path):
+    """Represent automatic providers without inventing paths from raw audio."""
+    supplied = bool(score_file.strip())
+    values = [
+        SCORE_FINGERPRINT_VERSION,
+        score_file if supplied else BLANK_SCORE_FILE,
+    ]
+    if supplied:
+        values.append(
+            fingerprint_candidate(
+                "explicit",
+                score_file if explicit_path is None else explicit_path,
+            )
+        )
+    values.extend(
+        (
+            _AUTOMATIC_SCORE_UNAVAILABLE,
+            _AUTOMATIC_SCORE_UNAVAILABLE,
+            ANALYSIS_PROVIDER_CONTRACT,
+        )
+    )
+    return tuple(values)
+
+
+def _prepare_score_dependencies(score_file, audio_path):
+    """Resolve Score paths and build the one shared dependency fingerprint."""
+    explicit_path, explicit_error = _resolve_score_path(score_file)
+    if audio_path is None:
+        json_sidecar_path = None
+        midi_sidecar_path = None
+        fingerprint = _unavailable_score_fingerprint(score_file, explicit_path)
+    else:
+        json_sidecar_path, midi_sidecar_path = derive_automatic_candidate_paths(
+            audio_path
+        )
+        fingerprint = build_score_fingerprint(
+            score_file=score_file,
+            explicit_path=explicit_path,
+            json_sidecar_path=json_sidecar_path,
+            midi_sidecar_path=midi_sidecar_path,
+        )
+    return (
+        explicit_path,
+        explicit_error,
+        json_sidecar_path,
+        midi_sidecar_path,
+        fingerprint,
+    )
+
+
 def _concise_exception_message(error, limit=200):
     """Format bounded exception text for a single-line node output."""
     message = " ".join(str(error).split()) or "no exception message"
     if len(message) > limit:
         return f"{message[:limit - 3]}..."
     return message
+
+
+def _diagnostic(code, severity, message):
+    return {
+        "code": code,
+        "severity": severity,
+        "message": _concise_exception_message(message),
+    }
+
+
+def _serialize_diagnostics(values):
+    return json.dumps(values, ensure_ascii=False, separators=(",", ":"))
+
+
+def _finite_float(name, value):
+    if type(value) not in (int, float):
+        raise TypeError(f"{name} must be an int or float")
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError(f"{name} must be finite")
+    return result
+
+
+def _score_start_is_canonical(
+    resolver,
+    start_bar,
+    start_beat,
+    start_subdivision,
+    subdivisions_per_beat,
+):
+    if type(start_bar) is not int or start_bar < 1:
+        return False
+    numerator, denominator = resolver.meter_at_bar(start_bar)
+    if type(start_beat) is not int or not 1 <= start_beat <= numerator:
+        return False
+    if type(subdivisions_per_beat) is not int or subdivisions_per_beat < 1:
+        return False
+    if (
+        type(start_subdivision) is not int
+        or not 0 <= start_subdivision < subdivisions_per_beat
+    ):
+        return False
+    return (
+        subdivisions_per_beat * denominator
+        <= 4 * resolver.score.ticks_per_quarter
+    )
 
 
 def f32_pcm(wav: torch.Tensor) -> torch.Tensor:
@@ -121,6 +302,10 @@ class MusicalLoadAudioUI:
                 "duration_subdivisions": ("INT", {"default": 0, "min": 0, "socketless": True}),
                 "subdivisions_per_beat": ("INT", {"default": 4, "min": 1, "socketless": True}),
                 "snap_mode": (["Off", "Bar", "Beat", "Subdivision", "Video Frame"], {"default": "Off", "socketless": True}),
+                "score_file": (
+                    "STRING",
+                    {"default": "", "socketless": True},
+                ),
             },
             "optional": {
                 "audioUI": ("AUDIO_UI", {"socketless": True}),
@@ -150,6 +335,12 @@ class MusicalLoadAudioUI:
         "STRING",
         "FLOAT",
         "FLOAT",
+        "INT",
+        "STRING",
+        "INT",
+        "STRING",
+        "STRING",
+        "STRING",
     )
     RETURN_NAMES = (
         "audio",
@@ -166,37 +357,24 @@ class MusicalLoadAudioUI:
         "musical_position",
         "bpm",
         "fps",
+        "end_frame_exclusive",
+        "section_name",
+        "sample_rate",
+        "score_format",
+        "score_provider",
+        "diagnostics",
     )
     FUNCTION = "load_audio"
 
     @classmethod
     def IS_CHANGED(cls, audio, **_kwargs):
-        if audio == "none":
-            return ("none", "none")
-
-        audio_path, resolution_error = _resolve_audio_path(audio)
-        if resolution_error is not None or audio_path is None:
-            return ("unresolved", audio)
-
-        try:
-            normalized_path = os.path.normcase(
-                os.path.abspath(os.path.normpath(os.fspath(audio_path)))
-            )
-        except (OSError, TypeError, ValueError):
-            return ("unresolved", audio)
-
-        try:
-            file_stat = os.stat(normalized_path)
-        except (OSError, ValueError):
-            return ("missing", audio, normalized_path)
-
-        return (
-            "file",
-            audio,
-            normalized_path,
-            file_stat.st_size,
-            file_stat.st_mtime_ns,
+        score_file = _kwargs.get("score_file", "")
+        audio_fingerprint, audio_path = _audio_dependency_fingerprint(audio)
+        *_, score_fingerprint = _prepare_score_dependencies(
+            score_file,
+            audio_path,
         )
+        return (*audio_fingerprint, score_fingerprint)
 
     @classmethod
     def VALIDATE_INPUTS(cls, audio):
@@ -226,6 +404,7 @@ class MusicalLoadAudioUI:
         duration_subdivisions,
         subdivisions_per_beat,
         snap_mode,
+        score_file,
         audioUI=None,
         bpm_input=_EXTERNAL_INPUT_MISSING,
         tempo_unit_input=_EXTERNAL_INPUT_MISSING,
@@ -248,14 +427,10 @@ class MusicalLoadAudioUI:
             downbeat_offset_input,
             downbeat_offset,
         )
-
-        effective_start_beat = start_beat
-        if (
-            type(start_beat) is int
-            and type(effective_beats_per_bar) is int
-            and effective_beats_per_bar >= 1
-        ):
-            effective_start_beat = min(start_beat, effective_beats_per_bar)
+        effective_alignment = _finite_float(
+            "downbeat_offset",
+            effective_downbeat_offset,
+        )
 
         # Determine the annotated file path if a file is actually selected
         # We wrap this in a try/except because get_annotated_filepath can fail if 
@@ -303,6 +478,165 @@ class MusicalLoadAudioUI:
         # reserved for the later frontend timeline implementation.
         _ = duration, snap_mode, audioUI
 
+        diagnostics_values = []
+        if fallback_warning is not None:
+            diagnostics_values.append(
+                _diagnostic(
+                    "score_provider_error",
+                    "warning",
+                    f"{fallback_warning}; using 1 second of silence",
+                )
+            )
+
+        (
+            explicit_score_path,
+            _explicit_resolution_error,
+            json_sidecar_path,
+            midi_sidecar_path,
+            score_fingerprint,
+        ) = _prepare_score_dependencies(score_file, audio_path)
+        providers = (
+            ExplicitFileProvider(
+                score_file=score_file,
+                resolved_path=explicit_score_path,
+                audio_path=audio_path,
+            ),
+            SidecarJsonProvider(
+                candidate_path=json_sidecar_path,
+                audio_path=audio_path,
+            ),
+            MidiSidecarProvider(candidate_path=midi_sidecar_path),
+            AnalysisProvider(),
+            ConstantProvider(),
+        )
+        try:
+            score_resolution = resolve_provider_chain(
+                providers,
+                audio_seconds_at_tick_zero=effective_alignment,
+                dependency_fingerprint=score_fingerprint,
+            )
+        except ProviderChainError as error:
+            message = "; ".join(error.diagnostics) or str(error)
+            fatal_diagnostics = _serialize_diagnostics(
+                [_diagnostic("score_provider_error", "error", message)]
+            )
+            raise ValueError(fatal_diagnostics) from None
+
+        provider_warnings = []
+        provider_diagnostics = []
+        for message in score_resolution.diagnostics:
+            is_stale_warning = message.startswith(
+                "score_source_identity_mismatch:"
+            )
+            target = provider_warnings if is_stale_warning else provider_diagnostics
+            target.append(
+                _diagnostic(
+                    (
+                        "score_provider_error"
+                        if is_stale_warning
+                        else "score_resolver_diagnostic"
+                    ),
+                    "warning",
+                    message,
+                )
+            )
+        diagnostics_values.extend(provider_warnings)
+        diagnostics_values.extend(provider_diagnostics)
+
+        resolver = None
+        score_tempo_map = None
+        active_score_map = None
+        musical_start_tick = None
+        activation_refused = False
+        start_not_canonical = False
+        if score_resolution.resolved_score is not None:
+            resolved_score = score_resolution.resolved_score
+            resolver = ScoreResolver(
+                score=resolved_score.score,
+                audio_duration_seconds=waveform.shape[-1] / sample_rate,
+                audio_seconds_at_tick_zero=effective_alignment,
+            )
+            score_tempo_map = ScoreTempoMap(resolver)
+            diagnostics_values.extend(
+                _diagnostic(
+                    "score_resolver_diagnostic",
+                    "warning",
+                    message,
+                )
+                for message in resolver.diagnostics
+            )
+            provider_alignment = score_resolution.provider_alignment_seconds
+            if (
+                provider_alignment is not None
+                and provider_alignment != effective_alignment
+            ):
+                diagnostics_values.append(
+                    _diagnostic(
+                        "score_alignment_divergence",
+                        "warning",
+                        "stored Score alignment differs from the effective node alignment; the node value remains authoritative",
+                    )
+                )
+
+            if score_tempo_map.supports_uniform_timing:
+                if edit_mode == "Seconds":
+                    active_score_map = score_tempo_map
+                elif edit_mode == "Musical":
+                    if _score_start_is_canonical(
+                        resolver,
+                        start_bar,
+                        start_beat,
+                        start_subdivision,
+                        effective_subdivisions_per_beat,
+                    ):
+                        musical_start_tick = resolver.position_to_tick(
+                            start_bar,
+                            start_beat,
+                            start_subdivision,
+                            effective_subdivisions_per_beat,
+                        )
+                        active_score_map = score_tempo_map
+                    else:
+                        start_not_canonical = True
+                        activation_refused = True
+                else:
+                    # The clip planner remains the edit-mode domain authority.
+                    active_score_map = score_tempo_map
+            else:
+                activation_refused = True
+
+        if start_not_canonical:
+            diagnostics_values.append(
+                _diagnostic(
+                    "score_start_position_not_canonical",
+                    "warning",
+                    "requested Musical start is not canonical for the resolved Score",
+                )
+            )
+        if activation_refused:
+            diagnostics_values.append(
+                _diagnostic(
+                    "score_activation_refused",
+                    "warning",
+                    "resolved Score cannot control editing; constant timing remains active",
+                )
+            )
+
+        planner_start_bar = start_bar
+        planner_start_beat = start_beat
+        planner_start_subdivision = start_subdivision
+        if active_score_map is not None and edit_mode == "Seconds":
+            planner_start_bar = 1
+            planner_start_beat = 1
+            planner_start_subdivision = 0
+        elif active_score_map is None:
+            if (
+                type(start_beat) is int
+                and type(effective_beats_per_bar) is int
+                and effective_beats_per_bar >= 1
+            ):
+                planner_start_beat = min(start_beat, effective_beats_per_bar)
+
         plan = create_audio_clip_plan(
             edit_mode=edit_mode,
             sample_rate=sample_rate,
@@ -313,15 +647,16 @@ class MusicalLoadAudioUI:
             tempo_unit=effective_tempo_unit,
             beats_per_bar=effective_beats_per_bar,
             beat_unit=effective_beat_unit,
-            downbeat_offset=effective_downbeat_offset,
+            downbeat_offset=effective_alignment,
             fps=effective_fps,
-            start_bar=start_bar,
-            start_beat=effective_start_beat,
-            start_subdivision=start_subdivision,
+            start_bar=planner_start_bar,
+            start_beat=planner_start_beat,
+            start_subdivision=planner_start_subdivision,
             duration_bars=duration_bars,
             duration_beats=duration_beats,
             duration_subdivisions=duration_subdivisions,
             subdivisions_per_beat=effective_subdivisions_per_beat,
+            tempo_map=active_score_map,
         )
 
         # Trim the waveform tensor -> shape: [channels, time]
@@ -331,12 +666,30 @@ class MusicalLoadAudioUI:
         audio_output = {"waveform": trimmed_waveform.unsqueeze(0), "sample_rate": sample_rate}
 
         out_filename = "" if audio == "none" or not path_exists else os.path.basename(audio)
-        musical_position = plan.musical_position
-        if fallback_warning is not None:
-            musical_position = (
-                f"{musical_position} · WARNING: {fallback_warning}; "
-                "using 1 second of silence"
-            )
+        section_name = ""
+        if resolver is not None:
+            if (
+                active_score_map is not None
+                and edit_mode == "Musical"
+                and not plan.clamped
+            ):
+                section_query_tick = musical_start_tick
+            else:
+                query_seconds = (
+                    plan.start_seconds
+                    if plan.clamped
+                    else plan.requested_start_seconds
+                )
+                section_query_tick = resolver.audio_seconds_to_tick(query_seconds)
+            section = select_section(resolver.sections(), section_query_tick)
+            if section is not None:
+                section_name = section.name
+
+        score_format = (
+            "constant"
+            if score_resolution.resolved_score is None
+            else score_resolution.resolved_score.score.source
+        )
         return (
             audio_output,
             plan.duration_seconds,
@@ -349,7 +702,13 @@ class MusicalLoadAudioUI:
             plan.frames_per_beat,
             plan.seconds_per_bar,
             plan.frames_per_bar,
-            musical_position,
+            plan.musical_position,
             float(effective_bpm),
             float(effective_fps),
+            plan.start_frame + plan.frame_count,
+            section_name,
+            sample_rate,
+            score_format,
+            score_resolution.provider,
+            _serialize_diagnostics(diagnostics_values),
         )

@@ -88,7 +88,8 @@ class AudioChangeDetectionTests(unittest.TestCase):
         first = self.node_class.IS_CHANGED("none")
         second = self.node_class.IS_CHANGED("none", bpm=999)
 
-        self.assertEqual(first, ("none", "none"))
+        self.assertEqual(first[:2], ("none", "none"))
+        self.assertIsInstance(first[-1], tuple)
         self.assertEqual(first, second)
 
     def test_same_existing_file_metadata_returns_equal_fingerprints(self) -> None:
@@ -132,7 +133,8 @@ class AudioChangeDetectionTests(unittest.TestCase):
             first = self.node_class.IS_CHANGED(SELECTED_AUDIO)
             second = self.node_class.IS_CHANGED(SELECTED_AUDIO)
 
-        self.assertEqual(first, ("unresolved", SELECTED_AUDIO))
+        self.assertEqual(first[:2], ("unresolved", SELECTED_AUDIO))
+        self.assertIsInstance(first[-1], tuple)
         self.assertEqual(first, second)
 
     def test_missing_file_returns_a_stable_missing_fingerprint(self) -> None:
@@ -145,11 +147,20 @@ class AudioChangeDetectionTests(unittest.TestCase):
         self.assertEqual(first[1], SELECTED_AUDIO)
 
     def test_missing_to_existing_changes_the_fingerprint(self) -> None:
-        with patch.object(
-            self.module.os,
-            "stat",
-            side_effect=(FileNotFoundError(), _stat()),
-        ):
+        audio_states = iter((FileNotFoundError(), _stat()))
+        normalized_audio = os.path.normcase(
+            os.path.abspath(os.path.normpath(os.fspath(RESOLVED_AUDIO)))
+        )
+
+        def changing_stat(path: object) -> SimpleNamespace:
+            if os.fspath(path) == normalized_audio:
+                value = next(audio_states)
+                if isinstance(value, Exception):
+                    raise value
+                return value
+            raise FileNotFoundError
+
+        with patch.object(self.module.os, "stat", side_effect=changing_stat):
             missing = self.node_class.IS_CHANGED(SELECTED_AUDIO)
             existing = self.node_class.IS_CHANGED(SELECTED_AUDIO)
 
@@ -158,11 +169,20 @@ class AudioChangeDetectionTests(unittest.TestCase):
         self.assertNotEqual(missing, existing)
 
     def test_existing_to_missing_changes_the_fingerprint(self) -> None:
-        with patch.object(
-            self.module.os,
-            "stat",
-            side_effect=(_stat(), FileNotFoundError()),
-        ):
+        audio_states = iter((_stat(), FileNotFoundError()))
+        normalized_audio = os.path.normcase(
+            os.path.abspath(os.path.normpath(os.fspath(RESOLVED_AUDIO)))
+        )
+
+        def changing_stat(path: object) -> SimpleNamespace:
+            if os.fspath(path) == normalized_audio:
+                value = next(audio_states)
+                if isinstance(value, Exception):
+                    raise value
+                return value
+            raise FileNotFoundError
+
+        with patch.object(self.module.os, "stat", side_effect=changing_stat):
             existing = self.node_class.IS_CHANGED(SELECTED_AUDIO)
             missing = self.node_class.IS_CHANGED(SELECTED_AUDIO)
 
@@ -218,8 +238,16 @@ class AudioChangeDetectionTests(unittest.TestCase):
 
     def test_is_changed_does_not_mutate_inputs(self) -> None:
         audio = SELECTED_AUDIO
-        unrelated = {"start_time": [1.25], "mode": {"value": "Musical"}}
-        expected = {"start_time": [1.25], "mode": {"value": "Musical"}}
+        unrelated = {
+            "score_file": "scores/song.score.json",
+            "start_time": [1.25],
+            "mode": {"value": "Musical"},
+        }
+        expected = {
+            "score_file": "scores/song.score.json",
+            "start_time": [1.25],
+            "mode": {"value": "Musical"},
+        }
 
         with patch.object(self.module.os, "stat", return_value=_stat()):
             self.node_class.IS_CHANGED(audio, **unrelated)

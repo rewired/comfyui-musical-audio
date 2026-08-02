@@ -37,6 +37,7 @@ EXPECTED_WIDGETS = (
     "duration_subdivisions",
     "subdivisions_per_beat",
     "snap_mode",
+    "score_file",
 )
 TARGET_WIDGET_INPUTS = (
     "bpm",
@@ -102,8 +103,24 @@ ORIGINAL_RETURN_NAMES = (
     "frames_per_bar",
     "musical_position",
 )
-EXPECTED_RETURN_TYPES = ORIGINAL_RETURN_TYPES + ("FLOAT", "FLOAT")
-EXPECTED_RETURN_NAMES = ORIGINAL_RETURN_NAMES + ("bpm", "fps")
+EXISTING_RETURN_TYPES = ORIGINAL_RETURN_TYPES + ("FLOAT", "FLOAT")
+EXISTING_RETURN_NAMES = ORIGINAL_RETURN_NAMES + ("bpm", "fps")
+EXPECTED_RETURN_TYPES = EXISTING_RETURN_TYPES + (
+    "INT",
+    "STRING",
+    "INT",
+    "STRING",
+    "STRING",
+    "STRING",
+)
+EXPECTED_RETURN_NAMES = EXISTING_RETURN_NAMES + (
+    "end_frame_exclusive",
+    "section_name",
+    "sample_rate",
+    "score_format",
+    "score_provider",
+    "diagnostics",
+)
 
 
 def _node_class() -> ast.ClassDef:
@@ -208,17 +225,19 @@ class StaticNodeContractTests(unittest.TestCase):
     def test_all_output_types_are_in_required_order(self) -> None:
         return_types = _class_literal("RETURN_TYPES")
 
-        self.assertEqual(len(return_types), 14)
+        self.assertEqual(len(return_types), 20)
         self.assertEqual(return_types[:12], ORIGINAL_RETURN_TYPES)
-        self.assertEqual(return_types[12:], ("FLOAT", "FLOAT"))
+        self.assertEqual(return_types[:14], EXISTING_RETURN_TYPES)
+        self.assertEqual(return_types[14:], EXPECTED_RETURN_TYPES[14:])
         self.assertEqual(return_types, EXPECTED_RETURN_TYPES)
 
     def test_all_output_names_are_in_required_order(self) -> None:
         return_names = _class_literal("RETURN_NAMES")
 
-        self.assertEqual(len(return_names), 14)
+        self.assertEqual(len(return_names), 20)
         self.assertEqual(return_names[:12], ORIGINAL_RETURN_NAMES)
-        self.assertEqual(return_names[12:], ("bpm", "fps"))
+        self.assertEqual(return_names[:14], EXISTING_RETURN_NAMES)
+        self.assertEqual(return_names[14:], EXPECTED_RETURN_NAMES[14:])
         self.assertEqual(return_names, EXPECTED_RETURN_NAMES)
 
     def test_all_local_widgets_are_socketless(self) -> None:
@@ -238,6 +257,12 @@ class StaticNodeContractTests(unittest.TestCase):
         for widget_name, expected_spec in EXPECTED_TARGET_WIDGET_SPECS.items():
             with self.subTest(widget_name=widget_name):
                 self.assertEqual(_required_input_spec(widget_name), expected_spec)
+
+    def test_score_file_is_the_exact_required_local_string_widget(self) -> None:
+        self.assertEqual(
+            _required_input_spec("score_file"),
+            ("STRING", {"default": "", "socketless": True}),
+        )
 
     def test_local_beat_widgets_use_the_named_practical_limit(self) -> None:
         self.assertEqual(_module_literal("MAX_LOCAL_BEATS_PER_BAR"), 64)
@@ -312,6 +337,7 @@ class StaticNodeContractTests(unittest.TestCase):
         positional_names = tuple(argument.arg for argument in method.args.args)
 
         self.assertIsNone(method.args.kwarg)
+        self.assertEqual(positional_names[-9], "score_file")
         self.assertEqual(
             positional_names[-8:],
             (
@@ -366,17 +392,23 @@ class StaticNodeContractTests(unittest.TestCase):
 
         self.assertEqual(bare_handlers, [])
 
-    def test_duration_and_score_free_node_contract_remain_unchanged(self) -> None:
+    def test_duration_and_score_contract_has_only_the_frozen_phase4_additions(self) -> None:
         all_input_names = (*_input_group("required"), *_input_group("optional"))
         return_names = _class_literal("RETURN_NAMES")
 
         self.assertIn("duration", _input_group("required"))
         self.assertIn("duration", return_names)
-        self.assertNotIn("diagnostics", return_names)
-        self.assertFalse(any("score" in name.lower() for name in all_input_names))
-        self.assertNotIn("score_file", all_input_names)
+        self.assertIn("diagnostics", return_names)
+        self.assertEqual(
+            tuple(name for name in all_input_names if "score" in name.lower()),
+            ("score_file",),
+        )
+        self.assertIn("score_file", all_input_names)
         self.assertNotIn("stems_dir", all_input_names)
-        self.assertFalse(any("score" in name.lower() for name in return_names))
+        self.assertEqual(
+            tuple(name for name in return_names if "score" in name.lower()),
+            ("score_format", "score_provider"),
+        )
 
         node_tree = ast.parse(NODE_SOURCE.read_text(encoding="utf-8"))
         class_names = [

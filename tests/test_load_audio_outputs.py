@@ -3,6 +3,7 @@
 from contextlib import redirect_stdout
 import importlib.util
 import io
+import json
 from pathlib import Path
 import sys
 from types import ModuleType, SimpleNamespace
@@ -136,6 +137,7 @@ def _run_load_audio(
         "duration_beats": 1,
         "duration_subdivisions": 0,
         "snap_mode": "Off",
+        "score_file": "",
     }
     inputs.update(overrides)
     decoder = Mock(
@@ -164,7 +166,7 @@ class LoadAudioOutputContractTests(unittest.TestCase):
         module = _load_node_module(planner)
         result = _load_audio(module)
 
-        self.assertEqual(len(result), 14)
+        self.assertEqual(len(result), 20)
         self.assertEqual(result[0]["sample_rate"], 48_000)
         self.assertIsInstance(result[0]["waveform"], FakeTensor)
         self.assertEqual(result[0]["waveform"].shape, (1, 2, 18))
@@ -185,6 +187,10 @@ class LoadAudioOutputContractTests(unittest.TestCase):
         self.assertEqual(result[13], float(LOCAL_TIMING_VALUES["fps"]))
         self.assertIsInstance(result[12], float)
         self.assertIsInstance(result[13], float)
+        self.assertEqual(
+            result[14:],
+            (24, "", 48_000, "constant", "constant", "[]"),
+        )
 
         planning_inputs = planner.call_args.kwargs
         for planner_name, local_value in LOCAL_TIMING_VALUES.items():
@@ -297,12 +303,15 @@ class LoadAudioOutputContractTests(unittest.TestCase):
 
         run = _run_load_audio(module, audio="none")
 
-        self.assertEqual(len(run.result), 14)
-        self.assertIn("WARNING", run.result[11])
-        self.assertIn("no file selected", run.result[11])
-        self.assertIn("using 1 second of silence", run.result[11])
+        self.assertEqual(len(run.result), 20)
+        self.assertNotIn("WARNING", run.result[11])
+        warning = json.loads(run.result[19])
+        self.assertEqual(warning[0]["code"], "score_provider_error")
+        self.assertIn("no file selected", warning[0]["message"])
+        self.assertIn("using 1 second of silence", warning[0]["message"])
         self.assertIn("Outputting 1 second of silence", run.stdout)
         self.assertEqual(run.result[0]["sample_rate"], 44_100)
+        self.assertEqual(run.result[16], 44_100)
         self.assertEqual(run.result[0]["waveform"].shape, (1, 2, 44_100))
         self.assertEqual(run.result[2], "")
         module.torch.zeros.assert_called_once_with((2, 44_100))
@@ -320,10 +329,11 @@ class LoadAudioOutputContractTests(unittest.TestCase):
         ):
             run = _run_load_audio(module, audio=selected_audio)
 
-        self.assertIn("WARNING", run.result[11])
-        self.assertIn(selected_audio, run.result[11])
-        self.assertIn("path could not be resolved", run.result[11])
-        self.assertIn("using 1 second of silence", run.result[11])
+        self.assertNotIn("WARNING", run.result[11])
+        warning = json.loads(run.result[19])[0]
+        self.assertIn(selected_audio, warning["message"])
+        self.assertIn("path could not be resolved", warning["message"])
+        self.assertIn("using 1 second of silence", warning["message"])
         self.assertIn(selected_audio, run.stdout)
         self.assertEqual(run.result[2], "")
         run.decoder.assert_not_called()
@@ -340,10 +350,11 @@ class LoadAudioOutputContractTests(unittest.TestCase):
             path_exists=False,
         )
 
-        self.assertIn("WARNING", run.result[11])
-        self.assertIn(selected_audio, run.result[11])
-        self.assertIn("file not found", run.result[11])
-        self.assertIn("using 1 second of silence", run.result[11])
+        self.assertNotIn("WARNING", run.result[11])
+        warning = json.loads(run.result[19])[0]
+        self.assertIn(selected_audio, warning["message"])
+        self.assertIn("file not found", warning["message"])
+        self.assertIn("using 1 second of silence", warning["message"])
         self.assertIn(selected_audio, run.stdout)
         self.assertEqual(run.result[2], "")
         run.decoder.assert_not_called()
@@ -356,16 +367,18 @@ class LoadAudioOutputContractTests(unittest.TestCase):
 
         run = _run_load_audio(module, decode_error=decode_error)
 
-        self.assertIn("WARNING", run.result[11])
-        self.assertIn("fixture.wav", run.result[11])
-        self.assertIn("decode failed", run.result[11])
-        self.assertIn("RuntimeError", run.result[11])
-        self.assertIn("decoder exploded second line", run.result[11])
-        self.assertIn("using 1 second of silence", run.result[11])
-        self.assertNotIn("\n", run.result[11])
-        self.assertNotIn("\r", run.result[11])
+        self.assertNotIn("WARNING", run.result[11])
+        warning = json.loads(run.result[19])[0]
+        self.assertIn("fixture.wav", warning["message"])
+        self.assertIn("decode failed", warning["message"])
+        self.assertIn("RuntimeError", warning["message"])
+        self.assertIn("decoder exploded second line", warning["message"])
+        self.assertIn("using 1 second of silence", warning["message"])
+        self.assertNotIn("\n", warning["message"])
+        self.assertNotIn("\r", warning["message"])
         self.assertIn("Error decoding fixture.wav", run.stdout)
         self.assertEqual(run.result[0]["sample_rate"], 44_100)
+        self.assertEqual(run.result[16], 44_100)
         self.assertEqual(run.result[2], "fixture.wav")
         module.torch.zeros.assert_called_once_with((2, 44_100))
         planner.assert_called_once()
@@ -379,9 +392,10 @@ class LoadAudioOutputContractTests(unittest.TestCase):
             decode_error=ValueError("x" * 1_000),
         )
 
-        self.assertLess(len(run.result[11]), 400)
-        self.assertIn("ValueError", run.result[11])
-        self.assertIn("...", run.result[11])
+        warning = json.loads(run.result[19])[0]
+        self.assertLessEqual(len(warning["message"]), 200)
+        self.assertIn("ValueError", warning["message"])
+        self.assertIn("...", warning["message"])
 
     def test_start_beat_is_clamped_only_at_the_upper_bar_boundary(self) -> None:
         cases = (
