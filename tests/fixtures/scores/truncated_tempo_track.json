@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "ticks_per_quarter": 480,
+  "tempos": [
+    {
+      "tick": 0,
+      "us_per_quarter": 500000
+    },
+    {
+      "tick": 960,
+      "us_per_quarter": 600000
+    }
+  ],
+  "meters": [
+    {
+      "tick": 0,
+      "numerator": 4,
+      "denominator": 4
+    }
+  ],
+  "markers": [
+    {
+      "tick": 5000,
+      "name": "Outro"
+    }
+  ],
+  "sections": [
+    {
+      "name": "Outro",
+      "start_tick": 3840,
+      "end_tick_exclusive": 6000,
+      "bar_aligned": true,
+      "confidence": null
+    }
+  ],
+  "source": "midi",
+  "meter_estimated": false
+}

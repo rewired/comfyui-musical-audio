@@ -1,9 +1,8 @@
 # Score Phase 2 Design
 
 > **Status:** binding implementation design for Phase 2.
-> **Revision:** 1 — chapters through "MIDI section derivation" are settled.
-> Chapters from "JSON and sidecar boundaries" onward are marked open and
-> correspond to items 5 through 9 of the Phase 2 clarification.
+> **Revision:** 1 — chapters through the Phase 2b acceptance criteria are
+> settled, except for the explicitly open Phase 2c resolver material.
 
 ## Status and normative precedence
 
@@ -470,17 +469,123 @@ would be unreachable code that someone later mistakes for a real case.
 
 ## JSON and sidecar boundaries
 
-**Open — item 6.** Already decided and to be carried over:
+**Binding for Phase 2b.** Serialization has two independently versioned
+levels:
 
 - two levels: `score_to_dict` / `score_from_dict` for the pure Score,
   `sidecar_to_dict` / `sidecar_from_dict` for the envelope holding
-  `audio_seconds_at_tick_zero`, `generator`, `derived_from`, `edited`
+  `end_tick_exclusive`, `audio_seconds_at_tick_zero`, `generator`,
+  `derived_from`, and `edited`
 - `meter_estimated` is serialized because it is not derivable
 - `has_variable_meter`, `has_midbar_meter_change`, and `bar_starts` are
   **not** serialized; they are recomputed on load
 - `ResolvedScore.provider` does not belong in the file: the same file can be
   found as `explicit` or as `json_sidecar`
-- negative ticks and sections past the end are validated here
+
+A pure `Score` has no global track or audio end and remains that way.
+`score_from_dict()` validates intrinsic Score structure only. The sidecar
+envelope carries `end_tick_exclusive`, and `sidecar_from_dict()` validates
+markers and Sections against that declared end. The extent is sidecar/source
+metadata, not a `Score` field. Phase 2c may later calculate an appropriate
+extent from audio duration; Phase 2b only serializes and validates the supplied
+value.
+
+```python
+SCORE_SCHEMA_VERSION = 1
+SIDECAR_SCHEMA_VERSION = 1
+
+@dataclass(frozen=True)
+class GeneratorInfo:
+    name: str
+    version: str
+    algorithm_version: int
+    config_fingerprint: str
+
+@dataclass(frozen=True)
+class DerivedFrom:
+    filename: str
+    size: int
+    mtime_ns: int
+
+@dataclass(frozen=True)
+class ScoreSidecar:
+    score: Score
+    end_tick_exclusive: int
+    audio_seconds_at_tick_zero: float
+    generator: GeneratorInfo
+    derived_from: DerivedFrom
+    edited: bool
+```
+
+The pure Score object uses this key order:
+
+```text
+schema_version, ticks_per_quarter, tempos, meters, markers, sections,
+source, meter_estimated
+```
+
+Its nested objects are also exact and ordered: tempo objects use
+`tick, us_per_quarter`; meter objects use
+`tick, numerator, denominator`; marker objects use `tick, name`; and Section
+objects use
+`name, start_tick, end_tick_exclusive, bar_aligned, confidence`. Every field
+is required and unknown fields are rejected. `source` is exactly one of
+`json`, `midi`, `analyzed`, or `constant` and is preserved across a round
+trip. Marker and Section names are preserved without trimming, case changes,
+Unicode normalization, or empty-string replacement.
+
+The sidecar object uses this key order:
+
+```text
+schema_version, score, end_tick_exclusive, audio_seconds_at_tick_zero,
+generator, derived_from, edited
+```
+
+The nested `score` is the complete pure Score representation. The outer
+schema version governs the envelope and the nested schema version governs the
+Score independently; the duplication is intentional.
+
+Generator objects use the exact key order
+`name, version, algorithm_version, config_fingerprint`; source-provenance
+objects use `filename, size, mtime_ns`. Every field is required and unknown
+fields are rejected at the envelope and both metadata levels.
+
+Deserializers accept decoded Python JSON values, not strings. Objects and
+arrays must be built-in `dict` and `list` values. Required fields are exact:
+missing and unknown fields are errors at every level. Integers are built-in
+`int`, never `bool`. Real fields accept built-in `int` or `float`, never
+`bool`, must be finite, and become built-in `float`. Confidence accepts
+`None` or any finite built-in real value; no range is invented.
+
+Schema failures raise `ScoreSerializationError`, a `ValueError` carrying
+stable `code`, `path`, and `message` strings. Codes are limited to
+`invalid_type`, `missing_field`, `unknown_field`,
+`unsupported_schema_version`, and `invalid_value`; paths use deterministic
+JSON notation rooted at `$`, and the string representation includes the path
+and message. Deserializers perform no JSON string parsing and no filesystem
+access.
+
+Ticks and sidecar extents are nonnegative. TPQ, tempo values, and meter
+numerators are positive; meter denominators are powers of two through 64.
+Section ends are not before their starts. Names are built-in strings and are
+preserved exactly. Metadata strings may be empty; algorithm version, source
+size, and mtime are nonnegative; `edited` is a built-in bool.
+
+Loading a pure Score parses primitive values, calls `normalize_events()`,
+builds a static `BarGrid`, validates each stored `bar_aligned` value against
+exact boundary membership, then calls `finalize_score()`. The construction
+grid reaches the maximum of zero, the last effective meter tick, all marker
+ticks, and every Section boundary. It affects cache length only. Sections are
+sorted by `(start_tick, end_tick_exclusive, name)` without deduplication.
+
+The sidecar additionally rejects markers past `end_tick_exclusive`, Section
+starts past it, and Section ends past it. Equality with the declared end is
+valid, including an end marker or zero-length Section at the end.
+
+Canonical fixture JSON is UTF-8 without BOM, LF-only, two-space indented,
+`ensure_ascii=False`, and terminated by exactly one newline. Schema key order,
+not `sort_keys=True`, defines object order; Python canonicalization defines
+array order.
 
 ## Resolver construction order
 
@@ -552,7 +657,8 @@ events do not come back, and that is intended.
 
 ## Fixture and test matrix
 
-**Open — item 8.** What the real material already fixes:
+**Binding through Phase 2b.** The real material fixes the MIDI parser happy
+path, while canonical JSON fixtures establish the initial shared Score corpus.
 
 The real Cubase MIDI is authoritative for the happy path. A small test-only
 SMF writer may generate valid synthetic fixtures, while intentionally
@@ -594,9 +700,29 @@ file, multiple tracks, mid-bar meter change, mid-bar tempo change, running
 status after SysEx, missing EOT, invalid VLQ, SMPTE division, Latin-1 marker
 name.
 
+Phase 2b adds seven pure Score fixtures — `constant_4_4.json`,
+`changing_meter.json`, `midbar_tempo.json`, `midbar_meter.json`,
+`odd_meter_31_32.json`, `unaligned_markers.json`, and
+`truncated_tempo_track.json` — plus `sidecar_v1.json`. Tests regenerate every
+fixture with `json.dumps(value, ensure_ascii=False, indent=2) + "\n"` and
+compare the UTF-8 bytes exactly. They cover constant and changing meter,
+mid-bar tempo and meter events, odd meter, exact raw names, unaligned and
+zero-length Sections, and event data ending before sidecar extent. Resolver
+expectations do not belong in these fixtures yet.
+
 ## Phase 2 acceptance criteria
 
-**Open — item 9.**
+**Binding for Phase 2b:** strict schema and metadata validation; exact object
+key order; pure Score and sidecar round trips; normalization through the Phase
+2a pipeline; recomputed meter flags; exact marker and Section names; preserved
+duplicates; Section-alignment validation; sidecar-extent validation; canonical
+fixture bytes; stdlib-only imports; no production I/O or side effects; and the
+complete Phase 2a and repository test suites remaining green.
+
+**Open for Phase 2c and final Phase 2 acceptance:** tempo segments,
+tick/seconds conversion, the audio-duration-dependent grid, position queries,
+extrapolation, and resolver round-trip/monotonicity acceptance. Phase 2b does
+not claim that all of Phase 2 is complete.
 
 ## Appendix: what changes once markers exist
 

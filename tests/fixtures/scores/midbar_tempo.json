@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "ticks_per_quarter": 480,
+  "tempos": [
+    {
+      "tick": 0,
+      "us_per_quarter": 500000
+    },
+    {
+      "tick": 960,
+      "us_per_quarter": 400000
+    }
+  ],
+  "meters": [
+    {
+      "tick": 0,
+      "numerator": 4,
+      "denominator": 4
+    }
+  ],
+  "markers": [],
+  "sections": [],
+  "source": "midi",
+  "meter_estimated": false
+}

@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "score": {
+    "schema_version": 1,
+    "ticks_per_quarter": 480,
+    "tempos": [
+      {
+        "tick": 0,
+        "us_per_quarter": 500000
+      },
+      {
+        "tick": 960,
+        "us_per_quarter": 600000
+      }
+    ],
+    "meters": [
+      {
+        "tick": 0,
+        "numerator": 4,
+        "denominator": 4
+      }
+    ],
+    "markers": [
+      {
+        "tick": 5000,
+        "name": "Outro"
+      }
+    ],
+    "sections": [
+      {
+        "name": "Outro",
+        "start_tick": 3840,
+        "end_tick_exclusive": 6000,
+        "bar_aligned": true,
+        "confidence": null
+      }
+    ],
+    "source": "midi",
+    "meter_estimated": false
+  },
+  "end_tick_exclusive": 8000,
+  "audio_seconds_at_tick_zero": -0.25,
+  "generator": {
+    "name": "score-core",
+    "version": "0.2.0",
+    "algorithm_version": 1,
+    "config_fingerprint": "phase2b-fixture"
+  },
+  "derived_from": {
+    "filename": "velvet-lies.mid",
+    "size": 129,
+    "mtime_ns": 0
+  },
+  "edited": true
+}

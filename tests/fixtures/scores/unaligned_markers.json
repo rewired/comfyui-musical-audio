@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "ticks_per_quarter": 480,
+  "tempos": [
+    {
+      "tick": 0,
+      "us_per_quarter": 500000
+    }
+  ],
+  "meters": [
+    {
+      "tick": 0,
+      "numerator": 4,
+      "denominator": 4
+    }
+  ],
+  "markers": [
+    {
+      "tick": 0,
+      "name": ""
+    },
+    {
+      "tick": 100,
+      "name": "  Chorus  "
+    },
+    {
+      "tick": 200,
+      "name": "Café"
+    },
+    {
+      "tick": 300,
+      "name": "Café"
+    },
+    {
+      "tick": 400,
+      "name": "🎵"
+    }
+  ],
+  "sections": [
+    {
+      "name": "",
+      "start_tick": 0,
+      "end_tick_exclusive": 0,
+      "bar_aligned": true,
+      "confidence": null
+    },
+    {
+      "name": "  Chorus  ",
+      "start_tick": 100,
+      "end_tick_exclusive": 200,
+      "bar_aligned": false,
+      "confidence": 0.75
+    },
+    {
+      "name": "Café",
+      "start_tick": 1920,
+      "end_tick_exclusive": 2500,
+      "bar_aligned": true,
+      "confidence": null
+    },
+    {
+      "name": "Café",
+      "start_tick": 2500,
+      "end_tick_exclusive": 2500,
+      "bar_aligned": false,
+      "confidence": -1.25
+    },
+    {
+      "name": "🎵",
+      "start_tick": 2600,
+      "end_tick_exclusive": 3000,
+      "bar_aligned": false,
+      "confidence": null
+    }
+  ],
+  "source": "json",
+  "meter_estimated": false
+}

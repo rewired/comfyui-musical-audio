@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "ticks_per_quarter": 480,
+  "tempos": [
+    {
+      "tick": 0,
+      "us_per_quarter": 333333
+    }
+  ],
+  "meters": [
+    {
+      "tick": 0,
+      "numerator": 31,
+      "denominator": 32
+    }
+  ],
+  "markers": [
+    {
+      "tick": 0,
+      "name": "Odd"
+    }
+  ],
+  "sections": [
+    {
+      "name": "Odd",
+      "start_tick": 0,
+      "end_tick_exclusive": 1860,
+      "bar_aligned": true,
+      "confidence": null
+    }
+  ],
+  "source": "midi",
+  "meter_estimated": false
+}
