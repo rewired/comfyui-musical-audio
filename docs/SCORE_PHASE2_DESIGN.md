@@ -1,8 +1,8 @@
 # Score Phase 2 Design
 
 > **Status:** binding implementation design for Phase 2.
-> **Revision:** 1 — chapters through the Phase 2b acceptance criteria are
-> settled, except for the explicitly open Phase 2c resolver material.
+> **Revision:** 2 — the Phase 2c resolver design and final pure-core
+> acceptance criteria are settled.
 
 ## Status and normative precedence
 
@@ -27,8 +27,7 @@ is complete.
 Phase 2 builds the pure Score core: parser, canonical form, bar geometry,
 resolver, serialization. Fully tested, with no integration.
 
-The implementation is divided at the boundary between settled and open
-contracts:
+The implementation is divided into three reviewed milestones:
 
 - **Phase 2a:** `model.py`, `bars.py`, `normalize.py`, and `midi_parse.py`.
 - **Phase 2b:** `serialize.py`, the JSON and sidecar schema, Score and sidecar
@@ -36,8 +35,8 @@ contracts:
 - **Phase 2c:** `resolver.py`, tempo segments, tick/seconds queries, the
   audio-duration-dependent `BarGrid`, position queries, and extrapolation.
 
-This division follows the design boundary between settled and open contracts.
-It is not a weakening of Phase 2 acceptance.
+This division followed the design boundary between contracts as they became
+settled. It is not a weakening of Phase 2 acceptance.
 
 **Phase 2 does not touch the file system.** Every function takes `bytes`,
 `str`, or objects and returns objects. No `open()`, no `Path`, no network, no
@@ -589,29 +588,155 @@ array order.
 
 ## Resolver construction order
 
-Binding:
+**Binding for Phase 2c.** The public immutable value is:
+
+```python
+@dataclass(frozen=True)
+class ScoreResolver:
+    score: Score
+    audio_duration_seconds: float
+    audio_seconds_at_tick_zero: float
+```
+
+It exposes read-only `bar_grid` and `diagnostics` properties, plus exactly
+`tick_to_seconds`, `seconds_to_tick`, `tick_to_audio_seconds`,
+`audio_seconds_to_tick`, `bar_to_tick`, `bar_length_ticks`, `meter_at_bar`,
+`position_to_tick`, `tick_to_position`, and `sections` queries.
+
+Construction follows this order:
 
 ```text
-1. build effective tempo segments        (needs no grid)
-2. convert audio end to Score seconds    (needs tempo)
-3. convert Score seconds to through_tick
-4. clamp through_tick to at least 0
-5. build the BarGrid through the containing bar
+1. validate the Score and both audio values
+2. build effective tempo segments        (needs no grid)
+3. convert audio end to Score seconds    (needs tempo)
+4. convert Score seconds to audio_through_tick with ceil
+5. clamp through_tick to 0 and the final meter-event tick
+6. build and freeze the BarGrid through the containing bar
+7. validate Score meter flags and freeze resolver diagnostics
 ```
 
 ```text
 audio_end_score_seconds = audio_duration_seconds - audio_seconds_at_tick_zero
-through_tick            = ceil(score_seconds_to_tick(audio_end_score_seconds))
+raw_audio_end_tick      = seconds_to_tick(audio_end_score_seconds)
+audio_through_tick      = ceil(raw_audio_end_tick)
+through_tick            = max(0, audio_through_tick, score.meters[-1].tick)
 ```
 
 If `audio_seconds_at_tick_zero` exceeds the audio duration, the entire audio
-lies before Score tick 0 and `through_tick` would go negative. In that case
-`through_tick = 0` plus a diagnostic. The alignment itself is **not** altered
-— negative Score time queries remain ordinary tempo arithmetic; only the
-forward-built bar cache starts at tick 0. Pre-roll is permitted under S1, and
-a mis-set `downbeat_offset` reaches this case easily.
+lies before Score tick 0 and the resolver prepends exactly `audio ends before
+score tick zero; bar grid starts at tick 0` to the existing `BarGrid`
+diagnostics. The alignment itself is **not** altered — negative Score-time and
+negative audio-time queries remain ordinary tempo arithmetic; only the
+forward-built bar cache is clamped. Pre-roll is permitted under S1, and a
+mis-set `downbeat_offset` reaches this case easily.
+
+The grid begins at tick 0, has one sentinel boundary strictly beyond
+`through_tick`, and has one fewer `meters_by_bar` entry than boundaries. It is
+constructed once and never grows after resolver construction. Exact cached
+boundary count is not contractual when `through_tick` originates from
+floating-point seconds: tests assert coverage and sentinel invariants rather
+than a platform-sensitive table length.
 
 `bars.py` therefore still knows nothing about tempo, seconds, or audio.
+
+## Tempo segments and audio alignment
+
+Each canonical `TempoEvent` produces one frozen private `_TempoSegment` with
+`start_tick`, accumulated `start_seconds`, and `us_per_quarter`. Immutable
+tuples of segments, start ticks, and start seconds support binary search in
+both directions. The first segment starts at tick 0 and Score second 0.0;
+each following start second integrates the preceding effective tempo. The
+first tempo extrapolates before tick 0 and the last continues indefinitely.
+Neither conversion quantizes or clamps:
+
+```text
+tick_to_seconds(tick) = segment.start_seconds
+    + (tick - segment.start_tick) * segment.us_per_quarter
+      / (ticks_per_quarter * 1_000_000)
+
+seconds_to_tick(seconds) = segment.start_tick
+    + (seconds - segment.start_seconds) * ticks_per_quarter * 1_000_000
+      / segment.us_per_quarter
+
+tick_to_audio_seconds(tick) =
+    tick_to_seconds(tick) + audio_seconds_at_tick_zero
+
+audio_seconds_to_tick(audio_seconds) =
+    seconds_to_tick(audio_seconds - audio_seconds_at_tick_zero)
+```
+
+## Shared exact meter geometry and analytical bars
+
+`round_half_away_from_zero_ratio(numerator, denominator)` in `bars.py` is the
+single Python integer-ratio rounding implementation for calculated bar
+boundaries, beat starts, and subdivision offsets. It uses integer quotient and
+remainder arithmetic, supports either numerator sign, and rounds exact halves
+away from zero without floating-point division.
+
+`absolute_boundary(*, anchor_tick, bar_index, meter, ticks_per_quarter)` uses
+that helper. It is shared by `build_bar_grid()` and resolver extrapolation, so
+both paths have identical absolute rounding and no cumulative drift.
+
+Cached `bar_to_tick()` queries use `boundaries[bar - 1]`. Queries beyond the
+cached bar table use `absolute_boundary()` from the final effective meter
+event and its 1-based anchor bar. They never extrapolate from the final cached
+boundary and never grow or scan the cache. The exact integer inverse of those
+half-away boundaries provides the containing bar for far-future
+`tick_to_position()` calls; bounded one-step verification checks the result.
+
+`meter_at_bar()` reports the effective meter at the beginning of the bar. It
+does not imply the actual length of a bar shortened by a mid-bar meter change.
+The authoritative actual length is:
+
+```text
+bar_length_ticks(bar) = bar_to_tick(bar + 1) - bar_to_tick(bar)
+```
+
+## Canonical position queries
+
+Bars and beats are 1-based; subdivisions are 0-based. All four position
+components must be built-in integers, with booleans rejected. Beat and
+subdivision ranges come from the effective meter, and exact comparison rejects
+a grid finer than one tick:
+
+```text
+subdivisions_per_beat * meter.denominator <= 4 * ticks_per_quarter
+```
+
+Beat starts and subdivision offsets are each calculated absolutely with
+`round_half_away_from_zero_ratio()`, never by repeated rounded addition. Every
+result must satisfy `bar_start <= position_tick < bar_end`. Consequently,
+nominal positions under the old meter that land at or beyond a shortened
+mid-bar-change boundary are invalid; the meter event itself is Beat 1,
+Subdivision 0 of the following bar.
+
+`tick_to_position()` locates the containing bar without changing the cache,
+then considers a bounded set of nearby valid canonical positions and the
+following bar's first beat. It selects the smallest absolute tick distance;
+an exact tie selects the later resolved tick. Thus exact boundaries belong to
+the following bar, and every valid canonical position round-trips.
+
+## Resolver validation, Sections, and test context
+
+Before event tuples are indexed, construction validates the exact `Score`
+root, positive built-in TPQ, finite built-in audio numbers, nonempty canonical
+tempo and meter tuples, canonical markers and Sections, source, and Boolean
+flags. It rejects redundant consecutive effective events and requires the
+stored meter flags to equal the constructed grid flags. Query methods accept
+only the documented finite built-in numeric types and never allow accidental
+`IndexError`, `ZeroDivisionError`, `OverflowError`, or coercion of third-party
+numeric protocols to define behavior.
+
+`sections()` returns `self.score.sections` unchanged: no sorting, derivation,
+filtering, display bar, or bar count is introduced. Markers and Sections may
+extend beyond audio because pure `Score` has no global end.
+
+The seven pure Score JSON fixtures remain free of audio duration and alignment
+data. A frozen resolver-case value and immutable mapping in
+`tests/test_score_resolver.py` carry those test-only parameters and meaningful
+query points, including positive and negative alignment, audio ending before
+Score tick zero, source data ending before audio, and Score data beyond the
+audio-derived cache target.
 
 ## Diagnostics and error model
 
@@ -657,7 +782,7 @@ events do not come back, and that is intended.
 
 ## Fixture and test matrix
 
-**Binding through Phase 2b.** The real material fixes the MIDI parser happy
+**Binding through Phase 2c.** The real material fixes the MIDI parser happy
 path, while canonical JSON fixtures establish the initial shared Score corpus.
 
 The real Cubase MIDI is authoritative for the happy path. A small test-only
@@ -708,7 +833,8 @@ fixture with `json.dumps(value, ensure_ascii=False, indent=2) + "\n"` and
 compare the UTF-8 bytes exactly. They cover constant and changing meter,
 mid-bar tempo and meter events, odd meter, exact raw names, unaligned and
 zero-length Sections, and event data ending before sidecar extent. Resolver
-expectations do not belong in these fixtures yet.
+audio duration, alignment, and query expectations live only in the immutable
+test parameter table, not in pure Score JSON.
 
 ## Phase 2 acceptance criteria
 
@@ -719,10 +845,19 @@ duplicates; Section-alignment validation; sidecar-extent validation; canonical
 fixture bytes; stdlib-only imports; no production I/O or side effects; and the
 complete Phase 2a and repository test suites remaining green.
 
-**Open for Phase 2c and final Phase 2 acceptance:** tempo segments,
-tick/seconds conversion, the audio-duration-dependent grid, position queries,
-extrapolation, and resolver round-trip/monotonicity acceptance. Phase 2b does
-not claim that all of Phase 2 is complete.
+**Final binding acceptance through Phase 2c:** validated frozen resolver
+construction; piecewise and negative-time tempo conversion; exact audio
+alignment; an immutable audio-duration-dependent grid with conservative
+coverage; shared integer-only absolute rounding; analytical final-meter
+extrapolation and inverse lookup; authoritative actual bar lengths; canonical
+position validation and nearest-grid tie behavior; unchanged Section values;
+deterministic fixture-driven and generated invariants; stdlib-only imports; no
+production I/O or side effects; and the complete Score and repository test
+suites remaining green. These conditions close acceptance for the pure Python
+Score core.
+
+Phase 3 runtime `TempoMap` integration and JavaScript parity remain explicitly
+out of scope and are not claimed complete here.
 
 ## Appendix: what changes once markers exist
 

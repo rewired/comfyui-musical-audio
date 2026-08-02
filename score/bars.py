@@ -14,7 +14,11 @@ class BarGrid:
     has_midbar_meter_change: bool
 
 
-def _round_half_away_from_zero_ratio(numerator: int, denominator: int) -> int:
+def round_half_away_from_zero_ratio(numerator: int, denominator: int) -> int:
+    if type(numerator) is not int:
+        raise TypeError("numerator must be a built-in int")
+    if type(denominator) is not int:
+        raise TypeError("denominator must be a built-in int")
     if denominator <= 0:
         raise ValueError("denominator must be positive")
     sign = -1 if numerator < 0 else 1
@@ -71,14 +75,32 @@ def _validate_inputs(
     return canonical
 
 
-def _absolute_boundary(
+def absolute_boundary(
+    *,
     anchor_tick: int,
     bar_index: int,
     meter: MeterEvent,
     ticks_per_quarter: int,
 ) -> int:
+    if type(anchor_tick) is not int:
+        raise TypeError("anchor_tick must be a built-in int")
+    if type(bar_index) is not int:
+        raise TypeError("bar_index must be a built-in int")
+    if type(meter) is not MeterEvent:
+        raise TypeError("meter must be a MeterEvent")
+    if type(ticks_per_quarter) is not int or ticks_per_quarter <= 0:
+        raise ValueError("ticks_per_quarter must be a positive built-in int")
+    if type(meter.numerator) is not int or meter.numerator <= 0:
+        raise ValueError("meter numerator must be a positive built-in int")
+    if (
+        type(meter.denominator) is not int
+        or meter.denominator <= 0
+        or meter.denominator > 64
+        or meter.denominator & (meter.denominator - 1)
+    ):
+        raise ValueError("meter denominator must be a power of two through 64")
     numerator = bar_index * meter.numerator * 4 * ticks_per_quarter
-    return anchor_tick + _round_half_away_from_zero_ratio(
+    return anchor_tick + round_half_away_from_zero_ratio(
         numerator,
         meter.denominator,
     )
@@ -102,11 +124,11 @@ def build_bar_grid(
     bar_index = 1
 
     while boundaries[-1] <= through_tick:
-        next_boundary = _absolute_boundary(
-            anchor_tick,
-            bar_index,
-            current_meter,
-            ticks_per_quarter,
+        next_boundary = absolute_boundary(
+            anchor_tick=anchor_tick,
+            bar_index=bar_index,
+            meter=current_meter,
+            ticks_per_quarter=ticks_per_quarter,
         )
         if next_boundary <= boundaries[-1]:
             raise ValueError("meter resolution does not produce increasing boundaries")
