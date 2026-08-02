@@ -1,5 +1,10 @@
 # Audio Integration Contract
 
+## Status
+
+This specification is normative for the currently implemented audio loading,
+trimming, and output contract.
+
 ## Edit modes
 
 In **Seconds** mode, `start_time` and `end_time` are the trim source of truth.
@@ -11,8 +16,9 @@ settings provide grid metadata and the nearest musical position.
 In **Musical** mode, `start_time`, `end_time`, and `duration` do not affect the
 trim. The requested start and duration come from `calculate_musical_timing()`.
 
-`snap_mode` is accepted by the backend but is reserved for a later frontend
-timeline implementation and currently has no trimming effect.
+`snap_mode` is accepted by the backend for workflow compatibility. Snapping is
+implemented by the frontend Musical-mode timeline and does not directly alter
+backend trimming.
 
 ## Sample-based range resolution
 
@@ -52,4 +58,5 @@ The first three outputs remain `AUDIO`, `duration`, and `filename` in their
 original order. `duration` describes the actual returned waveform length.
 Additional outputs describe the actual selected range and its musical/video
 grid metadata; theoretical unclamped boundaries are not exposed as node
-outputs.
+outputs. The final two outputs, `bpm` and `fps`, report the effective execution
+values after optional external overrides.

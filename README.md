@@ -3,9 +3,9 @@
 ComfyUI Musical Audio provides the **Load Audio UI — Musical Grid** node, a
 ComfyUI audio loader and trimmer with ordinary seconds-based editing and a
 musical bar/beat/subdivision grid. It includes audio loading and playback,
-frame-aware metadata, and a draggable custom selection timeline. Version 0.1
-does not detect BPM automatically; tempo and grid alignment are configured by
-the user.
+frame-aware metadata, and a draggable custom selection timeline. The current
+implementation does not detect BPM automatically; tempo and grid alignment
+are configured by the user.
 
 ## Features
 
@@ -16,14 +16,18 @@ the user.
 - Configurable downbeat offset
 - Configurable subdivisions per beat
 - Configurable video FPS
-- Snapping modes: Off, Bar, Beat, Subdivision, and Video Frame
+- Optional external timing inputs for BPM, tempo unit, FPS, meter, grid, and
+  downbeat offset
+- Musical-mode snapping: Off, Bar, Beat, Subdivision, and Video Frame
 - Adaptive musical ruler
 - Audio playback limited to the active selection
+- Waveform visualization with an inline playback playhead
 - Drag-and-drop audio upload
 - Draggable start and end handles and selection body
 - Sample-based audio trimming
 - Deterministic half-away-from-zero rounding
 - Actual-range metadata after file clamping
+- Effective BPM and FPS outputs
 - Compatibility with ComfyUI's standard `AUDIO` output
 
 Automatic BPM and downbeat detection are not included.
@@ -56,6 +60,24 @@ git pull
 Then restart ComfyUI completely and refresh the browser with
 <kbd>Ctrl</kbd>+<kbd>F5</kbd> so updated frontend code is loaded.
 
+## Documentation
+
+This README is descriptive and introductory. The following documents define
+the project contracts within their stated scopes:
+
+- [Musical Timing Specification](docs/MUSICAL_TIMING_SPEC.md) — normative for
+  the currently implemented constant-tempo timing model.
+- [Audio Integration Contract](docs/AUDIO_INTEGRATION_SPEC.md) — normative for
+  the currently implemented audio loading, trimming, and output contract.
+- [Score Subsystem: Tempo Map and Markers](docs/SCORE_SUBSYSTEM.md) — frozen
+  Revision 1 architecture contract for the planned Score subsystem and its
+  implementation phases.
+
+If this README conflicts with one of these documents, the document whose
+stated scope covers the subject takes precedence. The Score architecture
+describes planned work; it does not claim that every described runtime feature
+is already implemented.
+
 ## Usage
 
 Add **Load Audio UI — Musical Grid** to a workflow and select or upload an
@@ -66,11 +88,12 @@ audio file. The mode control determines which fields define the active range.
 - **Start** and **End** define the trim range in seconds.
 - **End = 0** means the end of the file.
 - **Duration** is synchronized with the active range.
-- Snap can use the configured musical grid or video frame rate.
 
 ### Musical mode
 
 Musical mode defines the range using grid and selection fields.
+Snap is available in Musical mode and can target Bar, Beat, Subdivision, or
+Video Frame.
 
 Grid fields:
 
@@ -134,6 +157,12 @@ The node provides these outputs in this exact order:
 10. `seconds_per_bar` — `FLOAT`
 11. `frames_per_bar` — `FLOAT`
 12. `musical_position` — `STRING`
+13. `bpm` — `FLOAT`
+14. `fps` — `FLOAT`
+
+`bpm` and `fps` report the effective values used by the node. Optional
+external timing inputs override the corresponding saved local fallback values
+for execution.
 
 `duration`, `start_seconds`, `end_seconds`, `start_frame`, and `frame_count`
 describe the actual returned audio range after it has been clamped to the
@@ -172,7 +201,7 @@ node --check js/musical_grid.js
 
 No third-party JavaScript package installation is required.
 
-## Version 0.1 limitations
+## Current limitations
 
 - No automatic BPM detection
 - No automatic downbeat detection
@@ -180,7 +209,6 @@ No third-party JavaScript package installation is required.
 - No changing time signatures inside one audio file
 - No swing timing
 - No arbitrary tuplets beyond equal subdivisions
-- No waveform visualization
 
 ## Attribution and license
 

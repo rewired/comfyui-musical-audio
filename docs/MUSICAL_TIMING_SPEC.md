@@ -4,7 +4,7 @@ This document defines the musical timing model used by MusicalLoadAudioUI.
 
 ## Status
 
-This specification is normative for version 0.1.
+This specification is normative for the currently implemented constant-tempo timing model.
 
 Audio trimming remains sample-based. Video frame values are metadata and must not determine the audio sample boundaries.
 
