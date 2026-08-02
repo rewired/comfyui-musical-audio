@@ -10,7 +10,7 @@ import unittest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 NODE_SOURCE = REPO_ROOT / "musical_audio_ui.py"
 INIT_SOURCE = REPO_ROOT / "__init__.py"
-SCORE_SUBSYSTEM = REPO_ROOT / "SCORE_SUBSYSTEM.md"
+SCORE_SUBSYSTEM = REPO_ROOT / "docs" / "SCORE_SUBSYSTEM.md"
 FRONTEND_SOURCE = REPO_ROOT / "js" / "musical_audio_ui.js"
 FRONTEND_STYLESHEET = REPO_ROOT / "js" / "musical_audio_ui.css"
 AUDIO_TRANSPORT_SOURCE = REPO_ROOT / "js" / "audio_transport.js"
