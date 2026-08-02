@@ -1,4 +1,8 @@
 from .musical_audio_ui import MusicalLoadAudioUI
+from .waveform_routes import register_waveform_routes
+
+
+register_waveform_routes()
 
 
 NODE_CLASS_MAPPINGS = {
