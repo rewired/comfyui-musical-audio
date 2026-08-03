@@ -1,0 +1,134 @@
+{
+  "schema_version": 1,
+  "floating_tolerance": 1e-9,
+  "cases": [
+    {
+      "name": "constant 4-4 with positive alignment",
+      "score_fixture": "scores/constant_4_4.json",
+      "audio_duration_seconds": 8.0,
+      "audio_seconds_at_tick_zero": 0.25,
+      "subdivisions_per_beat": 4,
+      "queries": [
+        {"operation": "tickToSeconds", "arguments": [480], "expected": 0.5},
+        {"operation": "secondsToTick", "arguments": [1.0], "expected": 960.0},
+        {"operation": "tickToAudioSeconds", "arguments": [0], "expected": 0.25},
+        {"operation": "audioSecondsToTick", "arguments": [0.75], "expected": 480.0},
+        {"operation": "barToTick", "arguments": [2], "expected": 1920},
+        {"operation": "meterAtBar", "arguments": [2], "expected": {"numerator": 4, "denominator": 4}},
+        {"operation": "positionToTick", "arguments": [{"bar": 2, "beat": 2, "subdivision": 2}, 4], "expected": 2640},
+        {"operation": "tickToPosition", "arguments": [2640, 4], "expected": {"bar": 2, "beat": 2, "subdivision": 2}},
+        {"operation": "containingBarTicks", "arguments": [1920], "expected": {"startTick": 1920, "endTickExclusive": 3840, "bar": 2}},
+        {"operation": "containingBeatTicks", "arguments": [2399], "expected": {"startTick": 1920, "endTickExclusive": 2400, "bar": 2, "beat": 1}},
+        {"operation": "enumerateVisibleBoundaries", "arguments": [{"startAudioSeconds": 0.25, "endAudioSeconds": 0.75}, 2], "expected": [
+          {"kind": "bar", "tick": 0, "audioSeconds": 0.25, "position": {"bar": 1, "beat": 1, "subdivision": 0}},
+          {"kind": "subdivision", "tick": 240, "audioSeconds": 0.5, "position": {"bar": 1, "beat": 1, "subdivision": 1}}
+        ]},
+        {"operation": "snapToBar", "arguments": [1.25], "expected": {"audioSeconds": 2.25, "tick": 1920, "position": {"bar": 2, "beat": 1, "subdivision": 0}}},
+        {"operation": "snapToBeat", "arguments": [0.5], "expected": {"audioSeconds": 0.75, "tick": 480, "position": {"bar": 1, "beat": 2, "subdivision": 0}}},
+        {"operation": "snapToSubdivision", "arguments": [0.3125, 4], "expected": {"audioSeconds": 0.375, "tick": 120, "position": {"bar": 1, "beat": 1, "subdivision": 1}}},
+        {"operation": "snapToVideoFrame", "arguments": [0.03, 24], "expected": {"audioSeconds": 0.041666666666666664, "tick": null, "position": null}},
+        {"operation": "audioRangeToCanonicalSelection", "arguments": [{"startAudioSeconds": 0.26, "endAudioSeconds": 0.26, "nonEmptyIntent": true}, 4], "expected": {"start": {"bar": 1, "beat": 1, "subdivision": 0}, "endExclusive": {"bar": 1, "beat": 1, "subdivision": 1}, "startTick": 0, "endTickExclusive": 120, "expandedToOneSubdivision": true}},
+        {"operation": "canonicalSelectionToAudioRange", "arguments": [{"start": {"bar": 1, "beat": 1, "subdivision": 0}, "endExclusive": {"bar": 1, "beat": 1, "subdivision": 1}, "startTick": 0, "endTickExclusive": 120, "expandedToOneSubdivision": true}, 4], "expected": {"startAudioSeconds": 0.25, "endAudioSeconds": 0.375, "durationSeconds": 0.125, "startTick": 0, "endTickExclusive": 120}},
+        {"operation": "durationToCanonicalEnd", "arguments": [{"bar": 1, "beat": 1, "subdivision": 0}, {"bars": 1, "beats": 0, "subdivisions": 0}, 4], "expected": {"endExclusive": {"bar": 2, "beat": 1, "subdivision": 0}, "startTick": 0, "endTickExclusive": 1920, "meterStable": true}}
+      ]
+    },
+    {
+      "name": "multiple tempos and negative alignment",
+      "score_fixture": "scores/midbar_tempo.json",
+      "audio_duration_seconds": 10.0,
+      "audio_seconds_at_tick_zero": -0.5,
+      "subdivisions_per_beat": 4,
+      "queries": [
+        {"operation": "tickToSeconds", "arguments": [1920], "expected": 1.8},
+        {"operation": "secondsToTick", "arguments": [1.8], "expected": 1920.0},
+        {"operation": "tickToAudioSeconds", "arguments": [1920], "expected": 1.3},
+        {"operation": "snapToBeat", "arguments": [0.7], "expected": {"audioSeconds": 0.9, "tick": 1440, "position": {"bar": 1, "beat": 4, "subdivision": 0}}},
+        {"operation": "durationToCanonicalEnd", "arguments": [{"bar": 1, "beat": 1, "subdivision": 0}, {"bars": 1, "beats": 0, "subdivisions": 0}, 4], "expected": {"endExclusive": {"bar": 2, "beat": 1, "subdivision": 0}, "startTick": 0, "endTickExclusive": 1920, "meterStable": true}},
+        {"operation": "monotonicity", "arguments": [[-480, 0, 480, 960, 1920, 6000]], "expected": true}
+      ]
+    },
+    {
+      "name": "meter change at bar boundary",
+      "score_fixture": "scores/changing_meter.json",
+      "audio_duration_seconds": 10.0,
+      "audio_seconds_at_tick_zero": 0.0,
+      "subdivisions_per_beat": 4,
+      "queries": [
+        {"operation": "barToTick", "arguments": [3], "expected": 3360},
+        {"operation": "meterAtBar", "arguments": [2], "expected": {"numerator": 3, "denominator": 4}},
+        {"operation": "durationToCanonicalEnd", "arguments": [{"bar": 1, "beat": 1, "subdivision": 0}, {"bars": 1, "beats": 0, "subdivisions": 0}, 4], "expected": {"endExclusive": {"bar": 2, "beat": 1, "subdivision": 0}, "startTick": 0, "endTickExclusive": 1920, "meterStable": true}},
+        {"operation": "tickToPosition", "arguments": [1920, 4], "expected": {"bar": 2, "beat": 1, "subdivision": 0}}
+      ]
+    },
+    {
+      "name": "inside-bar meter change and shortened bar",
+      "score_fixture": "scores/midbar_meter.json",
+      "audio_duration_seconds": 10.0,
+      "audio_seconds_at_tick_zero": 0.0,
+      "subdivisions_per_beat": 4,
+      "queries": [
+        {"operation": "containingBarTicks", "arguments": [999], "expected": {"startTick": 0, "endTickExclusive": 1000, "bar": 1}},
+        {"operation": "containingBeatTicks", "arguments": [999], "expected": {"startTick": 960, "endTickExclusive": 1000, "bar": 1, "beat": 3}},
+        {"operation": "barToTick", "arguments": [2], "expected": 1000},
+        {"operation": "durationToCanonicalEnd", "arguments": [{"bar": 1, "beat": 1, "subdivision": 0}, {"bars": 1, "beats": 0, "subdivisions": 0}, 4], "expected": {"throws": {"name": "TimeAxisError", "code": "score_end_position_required"}}},
+        {"operation": "snapToBar", "arguments": [1.02], "expected": {"audioSeconds": 1.0416666666666667, "tick": 1000, "position": {"bar": 2, "beat": 1, "subdivision": 0}}}
+      ]
+    },
+    {
+      "name": "odd 31-32 exact tick grid",
+      "score_fixture": "scores/odd_meter_31_32.json",
+      "audio_duration_seconds": 4.0,
+      "audio_seconds_at_tick_zero": 0.0,
+      "subdivisions_per_beat": 2,
+      "queries": [
+        {"operation": "barToTick", "arguments": [2], "expected": 1860},
+        {"operation": "positionToTick", "arguments": [{"bar": 1, "beat": 2, "subdivision": 1}, 2], "expected": 90},
+        {"operation": "sectionAtTick", "arguments": [0], "expected": {"name": "Odd", "startTick": 0, "endTickExclusive": 1860, "barAligned": true, "confidence": null}},
+        {"operation": "sectionAtTick", "arguments": [1860], "expected": null},
+        {"operation": "positionToTick", "arguments": [{"bar": 1, "beat": 1, "subdivision": 0}, 61], "expected": {"throws": {"name": "RangeError", "code": null}}}
+      ]
+    },
+    {
+      "name": "unaligned markers and half-open sections",
+      "score_fixture": "scores/unaligned_markers.json",
+      "audio_duration_seconds": 5.0,
+      "audio_seconds_at_tick_zero": 0.0,
+      "subdivisions_per_beat": 4,
+      "queries": [
+        {"operation": "sectionAtTick", "arguments": [99], "expected": null},
+        {"operation": "sectionAtTick", "arguments": [100], "expected": {"name": "  Chorus  ", "startTick": 100, "endTickExclusive": 200, "barAligned": false, "confidence": 0.75}},
+        {"operation": "sectionAtTick", "arguments": [200], "expected": null},
+        {"operation": "sectionAtTick", "arguments": [2500], "expected": null},
+        {"operation": "sectionAtTick", "arguments": [2600], "expected": {"name": "\ud83c\udfb5", "startTick": 2600, "endTickExclusive": 3000, "barAligned": false, "confidence": null}}
+      ]
+    },
+    {
+      "name": "truncated tempo track extrapolation",
+      "score_fixture": "scores/truncated_tempo_track.json",
+      "audio_duration_seconds": 12.0,
+      "audio_seconds_at_tick_zero": -0.25,
+      "subdivisions_per_beat": 4,
+      "queries": [
+        {"operation": "barToTick", "arguments": [5], "expected": 7680},
+        {"operation": "tickToSeconds", "arguments": [6000], "expected": 7.3},
+        {"operation": "tickToAudioSeconds", "arguments": [6000], "expected": 7.05},
+        {"operation": "sectionAtTick", "arguments": [5999], "expected": {"name": "Outro", "startTick": 3840, "endTickExclusive": 6000, "barAligned": true, "confidence": null}},
+        {"operation": "sectionAtTick", "arguments": [6000], "expected": null},
+        {"operation": "safeRejection", "arguments": [], "expected": {"throws": {"name": "ScorePayloadError", "code": "score_tick_out_of_safe_range"}}}
+      ]
+    },
+    {
+      "name": "sidecar score schema",
+      "score_fixture": "scores/sidecar_v1.json",
+      "audio_duration_seconds": 12.0,
+      "audio_seconds_at_tick_zero": -0.25,
+      "subdivisions_per_beat": 4,
+      "queries": [
+        {"operation": "audioSecondsToTick", "arguments": [-0.25], "expected": 0.0},
+        {"operation": "barToTick", "arguments": [4], "expected": 5760},
+        {"operation": "sectionAtTick", "arguments": [3840], "expected": {"name": "Outro", "startTick": 3840, "endTickExclusive": 6000, "barAligned": true, "confidence": null}},
+        {"operation": "snapToVideoFrame", "arguments": [-0.03, 24], "expected": {"audioSeconds": -0.041666666666666664, "tick": null, "position": null}}
+      ]
+    }
+  ]
+}
