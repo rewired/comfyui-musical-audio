@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-from collections import OrderedDict
 import hashlib
 import logging
 import ntpath
 import os
-import threading
 from typing import Callable, NamedTuple
 from urllib.parse import urlsplit
 
 try:
+    from .route_cache import BoundedByteCache, if_none_match_matches
     from .waveform_peaks import (
         MAXIMUM_PEAKS_PER_SECOND,
         MINIMUM_FINAL_PEAKS_PER_SECOND,
@@ -22,6 +21,7 @@ try:
         generate_waveform_peak_payload,
     )
 except ImportError:  # Support direct test imports from the repository root.
+    from route_cache import BoundedByteCache, if_none_match_matches  # type: ignore[no-redef]
     from waveform_peaks import (  # type: ignore[no-redef]
         MAXIMUM_PEAKS_PER_SECOND,
         MINIMUM_FINAL_PEAKS_PER_SECOND,
@@ -66,78 +66,47 @@ class WaveformPayloadCache:
         maximum_entries: int = MAX_CACHE_ENTRIES,
         maximum_bytes: int = MAX_CACHE_BYTES,
     ) -> None:
-        if maximum_entries <= 0 or maximum_bytes <= 0:
-            raise ValueError("cache limits must be greater than zero")
         self.maximum_entries = maximum_entries
         self.maximum_bytes = maximum_bytes
-        self._entries: OrderedDict[WaveformCacheKey, bytes] = OrderedDict()
-        self._total_bytes = 0
-        self._lock = threading.Lock()
+        self._cache = BoundedByteCache(
+            maximum_entries=maximum_entries,
+            maximum_bytes=maximum_bytes,
+        )
 
     def get(self, key: WaveformCacheKey) -> bytes | None:
-        with self._lock:
-            payload = self._entries.get(key)
-            if payload is not None:
-                self._entries.move_to_end(key)
-            return payload
+        return self._cache.get(key)
 
     def put(self, key: WaveformCacheKey, payload: bytes) -> None:
-        if not isinstance(payload, bytes):
+        if type(payload) is not bytes:
             raise TypeError("cached waveform payloads must be immutable bytes")
-        with self._lock:
-            existing = self._entries.pop(key, None)
-            if existing is not None:
-                self._total_bytes -= len(existing)
-
-            obsolete = [
-                cached_key
-                for cached_key in self._entries
-                if cached_key.canonical_path == key.canonical_path
-            ]
-            for cached_key in obsolete:
-                self._total_bytes -= len(self._entries.pop(cached_key))
-
-            if len(payload) > self.maximum_bytes:
-                return
-            self._entries[key] = payload
-            self._total_bytes += len(payload)
-            while (
-                len(self._entries) > self.maximum_entries
-                or self._total_bytes > self.maximum_bytes
-            ):
-                _, evicted = self._entries.popitem(last=False)
-                self._total_bytes -= len(evicted)
+        self._cache.put(key, payload, logical_key=key.canonical_path)
 
     def get_or_build(
         self,
         key: WaveformCacheKey,
         builder: Callable[[], bytes],
     ) -> bytes:
-        payload = self.get(key)
-        if payload is not None:
-            return payload
-        # Decoding is deliberately outside the cache lock. Duplicate simultaneous
-        # misses are harmless, while unrelated cache hits remain responsive.
-        payload = builder()
-        if not isinstance(payload, bytes):
-            payload = bytes(payload)
-        self.put(key, payload)
-        return payload
+        def build_bytes() -> bytes:
+            payload = builder()
+            return payload if type(payload) is bytes else bytes(payload)
+
+        return self._cache.get_or_build(
+            key,
+            build_bytes,
+            logical_key=key.canonical_path,
+        )
 
     def clear(self) -> None:
-        with self._lock:
-            self._entries.clear()
-            self._total_bytes = 0
+        self._cache.clear()
 
     def snapshot(self) -> tuple[tuple[WaveformCacheKey, ...], int]:
         """Return LRU-to-MRU keys and total bytes for deterministic tests."""
 
-        with self._lock:
-            return tuple(self._entries), self._total_bytes
+        keys, total = self._cache.snapshot()
+        return tuple(keys), total
 
     def __len__(self) -> int:
-        with self._lock:
-            return len(self._entries)
+        return len(self._cache)
 
 
 WAVEFORM_PAYLOAD_CACHE = WaveformPayloadCache()
@@ -195,22 +164,6 @@ def make_waveform_etag(
         raise ValueError("ETag metadata cannot be negative")
     metadata = f"{format_version}:{file_size}:{modification_time_ns}".encode("ascii")
     return f'"maup-{hashlib.sha256(metadata).hexdigest()[:32]}"'
-
-
-def if_none_match_matches(value: str | None, etag: str) -> bool:
-    """Apply weak comparison semantics used by GET If-None-Match."""
-
-    if value is None:
-        return False
-    for candidate in value.split(","):
-        candidate = candidate.strip()
-        if candidate == "*":
-            return True
-        if candidate.startswith("W/"):
-            candidate = candidate[2:].strip()
-        if candidate == etag:
-            return True
-    return False
 
 
 def make_cache_key(canonical_path: str, stat_result: os.stat_result) -> WaveformCacheKey:

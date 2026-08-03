@@ -147,7 +147,7 @@ def _run_load_audio(
     stdout = io.StringIO()
     module.torch.zeros.reset_mock()
     with (
-        patch.object(module.os.path, "exists", return_value=path_exists),
+        patch.object(module.os.path, "isfile", return_value=path_exists),
         patch.object(module, "load_audio_file", decoder),
         redirect_stdout(stdout),
     ):
@@ -161,6 +161,9 @@ def _load_audio(module: ModuleType, **overrides: object) -> tuple[object, ...]:
 
 class LoadAudioOutputContractTests(unittest.TestCase):
     def test_local_values_are_used_when_external_inputs_are_absent(self) -> None:
+        source = NODE_SOURCE.read_text(encoding="utf-8")
+        self.assertIn("serialize_diagnostics", source)
+        self.assertNotIn("def _serialize_diagnostics", source)
         plan = _plan()
         planner = Mock(return_value=plan)
         module = _load_node_module(planner)

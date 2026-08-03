@@ -68,6 +68,9 @@ class AudioChangeDetectionTests(unittest.TestCase):
             return self.node_class.IS_CHANGED(SELECTED_AUDIO)
 
     def test_is_changed_exists_as_a_classmethod(self) -> None:
+        source = (REPO_ROOT / "musical_audio_ui.py").read_text(encoding="utf-8")
+        self.assertIn("prepare_score_repository_request", source)
+        self.assertNotIn("build_score_fingerprint", source)
         descriptor = vars(self.node_class)["IS_CHANGED"]
 
         self.assertIsInstance(descriptor, classmethod)

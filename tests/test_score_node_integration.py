@@ -199,11 +199,11 @@ def _run(
         planner.return_value = plan
     chain = None
     if resolution is not None:
-        chain = patch.object(module, "resolve_provider_chain", return_value=resolution)
+        chain = patch("score.runtime.resolve_provider_chain", return_value=resolution)
     decoder = Mock(return_value=(FakeTensor((2, 960_000)), 48_000))
     stdout = io.StringIO()
     contexts = [
-        patch.object(module.os.path, "exists", return_value=path_exists),
+        patch.object(module.os.path, "isfile", return_value=path_exists),
         patch.object(module, "load_audio_file", decoder),
     ]
     if chain is not None:
@@ -494,9 +494,8 @@ class FingerprintTests(unittest.TestCase):
                 "get_annotated_filepath",
                 side_effect=RuntimeError("unresolved"),
             ),
-            patch.object(
-                self.module,
-                "derive_automatic_candidate_paths",
+            patch(
+                "score.runtime.derive_automatic_candidate_paths",
                 side_effect=AssertionError("automatic path derived"),
             ),
         ):
@@ -878,9 +877,12 @@ class SectionAndDiagnosticsTests(unittest.TestCase):
 
 
 class ArchitectureTests(unittest.TestCase):
-    def test_folder_paths_remains_absent_from_score_package(self) -> None:
-        for path in (REPO_ROOT / "score").glob("*.py"):
-            self.assertNotIn("folder_paths", path.read_text(encoding="utf-8"))
+    def test_folder_paths_remains_at_the_phase5a_route_and_node_boundaries(self) -> None:
+        for name in ("providers.py", "runtime.py"):
+            source = (REPO_ROOT / "score" / name).read_text(encoding="utf-8")
+            self.assertNotIn("folder_paths", source)
+        route_source = (REPO_ROOT / "score" / "routes.py").read_text(encoding="utf-8")
+        self.assertIn("import folder_paths", route_source)
 
     def test_node_has_no_mutable_score_cache_and_provider_core_is_unchanged(self) -> None:
         source = NODE_SOURCE.read_text(encoding="utf-8")

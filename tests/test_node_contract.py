@@ -420,6 +420,10 @@ class StaticNodeContractTests(unittest.TestCase):
 
         init_source = INIT_SOURCE.read_text(encoding="utf-8")
         self.assertIn('"MusicalLoadAudioUI": MusicalLoadAudioUI', init_source)
+        self.assertLess(
+            init_source.index("register_waveform_routes()"),
+            init_source.index("register_score_routes()"),
+        )
         self.assertIn(
             '"MusicalLoadAudioUI": "Load Audio UI — Musical Grid"',
             init_source,

@@ -22,6 +22,7 @@ from waveform_routes import (
     resolve_input_file,
     waveform_peaks_handler,
 )
+from route_cache import BoundedByteCache
 
 
 def cache_key(
@@ -143,6 +144,7 @@ class ETagTests(unittest.TestCase):
 class PayloadCacheTests(unittest.TestCase):
     def test_hit_returns_same_bytes_and_updates_lru_order(self) -> None:
         cache = WaveformPayloadCache(maximum_entries=3, maximum_bytes=100)
+        self.assertIsInstance(cache._cache, BoundedByteCache)
         first = cache_key("first")
         second = cache_key("second")
         payload = b"payload"
@@ -243,6 +245,28 @@ class FakeRoutes:
         return decorate
 
 
+class FakeResponse:
+    def __init__(self, *, body=None, status=200, headers=None, content_type=None):
+        self.body = body
+        self.status = status
+        self.headers = {} if headers is None else dict(headers)
+        if content_type is not None:
+            self.headers.setdefault("Content-Type", content_type)
+
+    @classmethod
+    def json_response(cls, value, *, status=200):
+        return cls(body=value, status=status, content_type="application/json")
+
+
+def fake_aiohttp() -> ModuleType:
+    module = ModuleType("aiohttp")
+    module.web = SimpleNamespace(  # type: ignore[attr-defined]
+        Response=FakeResponse,
+        json_response=FakeResponse.json_response,
+    )
+    return module
+
+
 class RouteRegistrationTests(unittest.TestCase):
     def test_registration_is_idempotent_exact_and_get_only(self) -> None:
         server = SimpleNamespace(routes=FakeRoutes())
@@ -274,7 +298,7 @@ class RouteResponseTests(unittest.IsolatedAsyncioTestCase):
             )
             folder_paths = ModuleType("folder_paths")
             folder_paths.get_input_directory = lambda: directory  # type: ignore[attr-defined]
-            with patch.dict(sys.modules, {"folder_paths": folder_paths}), patch(
+            with patch.dict(sys.modules, {"folder_paths": folder_paths, "aiohttp": fake_aiohttp()}), patch(
                 "waveform_routes._build_cached_payload",
                 side_effect=AssertionError("304 must bypass payload generation"),
             ):
@@ -287,7 +311,7 @@ class RouteResponseTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             folder_paths = ModuleType("folder_paths")
             folder_paths.get_input_directory = lambda: directory  # type: ignore[attr-defined]
-            with patch.dict(sys.modules, {"folder_paths": folder_paths}):
+            with patch.dict(sys.modules, {"folder_paths": folder_paths, "aiohttp": fake_aiohttp()}):
                 for filename, expected_status in (
                     (None, 400),
                     ("none", 400),

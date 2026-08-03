@@ -1,5 +1,4 @@
 import folder_paths
-import json
 import math
 import os
 import torch
@@ -7,49 +6,38 @@ import av
 
 try:
     from .audio_clip_plan import create_audio_clip_plan
-    from .score.providers import (
-        ANALYSIS_PROVIDER_CONTRACT,
-        BLANK_SCORE_FILE,
-        SCORE_FINGERPRINT_VERSION,
-        AnalysisProvider,
-        ConstantProvider,
-        ExplicitFileProvider,
-        MidiSidecarProvider,
-        ProviderChainError,
-        SidecarJsonProvider,
-        build_score_fingerprint,
-        derive_automatic_candidate_paths,
-        fingerprint_candidate,
-        resolve_provider_chain,
-        select_section,
-    )
+    from .score.providers import select_section
     from .score.resolver import ScoreResolver
+    from .score.routes import _resolve_comfy_path
+    from .score.runtime import (
+        ResolvedPathState,
+        ScoreRepositoryError,
+        append_resolver_diagnostics,
+        diagnostic,
+        prepare_score_repository_request,
+        resolve_score_repository,
+        serialize_diagnostics,
+    )
     from .score.tempo_map import ScoreTempoMap
 except ImportError:  # Support direct module loading outside the package.
     from audio_clip_plan import create_audio_clip_plan
-    from score.providers import (
-        ANALYSIS_PROVIDER_CONTRACT,
-        BLANK_SCORE_FILE,
-        SCORE_FINGERPRINT_VERSION,
-        AnalysisProvider,
-        ConstantProvider,
-        ExplicitFileProvider,
-        MidiSidecarProvider,
-        ProviderChainError,
-        SidecarJsonProvider,
-        build_score_fingerprint,
-        derive_automatic_candidate_paths,
-        fingerprint_candidate,
-        resolve_provider_chain,
-        select_section,
-    )
+    from score.providers import select_section
     from score.resolver import ScoreResolver
+    from score.routes import _resolve_comfy_path
+    from score.runtime import (
+        ResolvedPathState,
+        ScoreRepositoryError,
+        append_resolver_diagnostics,
+        diagnostic,
+        prepare_score_repository_request,
+        resolve_score_repository,
+        serialize_diagnostics,
+    )
     from score.tempo_map import ScoreTempoMap
 
 
 _EXTERNAL_INPUT_MISSING = object()
 MAX_LOCAL_BEATS_PER_BAR = 64
-_AUTOMATIC_SCORE_UNAVAILABLE = ("automatic_score_candidate", "unavailable")
 
 
 def external_or_local(external_value, local_value):
@@ -63,7 +51,11 @@ def _resolve_audio_path(audio):
         return None, None
 
     try:
-        audio_path = folder_paths.get_annotated_filepath(audio)
+        audio_path = _resolve_comfy_path(
+            audio,
+            require_file=False,
+            folder_paths_module=folder_paths,
+        )
     except Exception as error:
         return None, error
     return audio_path or None, None
@@ -77,7 +69,11 @@ def _resolve_score_path(score_file):
         return None, None
 
     try:
-        score_path = folder_paths.get_annotated_filepath(score_file)
+        score_path = _resolve_comfy_path(
+            score_file,
+            require_file=False,
+            folder_paths_module=folder_paths,
+        )
     except Exception as error:
         return None, error
     if not score_path:
@@ -115,53 +111,19 @@ def _audio_dependency_fingerprint(audio):
     ), audio_path
 
 
-def _unavailable_score_fingerprint(score_file, explicit_path):
-    """Represent automatic providers without inventing paths from raw audio."""
-    supplied = bool(score_file.strip())
-    values = [
-        SCORE_FINGERPRINT_VERSION,
-        score_file if supplied else BLANK_SCORE_FILE,
-    ]
-    if supplied:
-        values.append(
-            fingerprint_candidate(
-                "explicit",
-                score_file if explicit_path is None else explicit_path,
-            )
-        )
-    values.extend(
-        (
-            _AUTOMATIC_SCORE_UNAVAILABLE,
-            _AUTOMATIC_SCORE_UNAVAILABLE,
-            ANALYSIS_PROVIDER_CONTRACT,
-        )
-    )
-    return tuple(values)
-
-
 def _prepare_score_dependencies(score_file, audio_path):
-    """Resolve Score paths and build the one shared dependency fingerprint."""
+    """Resolve boundary state and prepare the shared repository request."""
     explicit_path, explicit_error = _resolve_score_path(score_file)
-    if audio_path is None:
-        json_sidecar_path = None
-        midi_sidecar_path = None
-        fingerprint = _unavailable_score_fingerprint(score_file, explicit_path)
-    else:
-        json_sidecar_path, midi_sidecar_path = derive_automatic_candidate_paths(
-            audio_path
-        )
-        fingerprint = build_score_fingerprint(
-            score_file=score_file,
-            explicit_path=explicit_path,
-            json_sidecar_path=json_sidecar_path,
-            midi_sidecar_path=midi_sidecar_path,
-        )
-    return (
-        explicit_path,
-        explicit_error,
-        json_sidecar_path,
-        midi_sidecar_path,
-        fingerprint,
+    return prepare_score_repository_request(
+        score_file=score_file,
+        audio_path=audio_path,
+        explicit=ResolvedPathState(
+            selection=score_file,
+            resolved_path=explicit_path,
+            resolution_error=(
+                None if explicit_error is None else type(explicit_error).__name__
+            ),
+        ),
     )
 
 
@@ -171,18 +133,6 @@ def _concise_exception_message(error, limit=200):
     if len(message) > limit:
         return f"{message[:limit - 3]}..."
     return message
-
-
-def _diagnostic(code, severity, message):
-    return {
-        "code": code,
-        "severity": severity,
-        "message": _concise_exception_message(message),
-    }
-
-
-def _serialize_diagnostics(values):
-    return json.dumps(values, ensure_ascii=False, separators=(",", ":"))
 
 
 def _finite_float(name, value):
@@ -370,11 +320,11 @@ class MusicalLoadAudioUI:
     def IS_CHANGED(cls, audio, **_kwargs):
         score_file = _kwargs.get("score_file", "")
         audio_fingerprint, audio_path = _audio_dependency_fingerprint(audio)
-        *_, score_fingerprint = _prepare_score_dependencies(
+        score_request = _prepare_score_dependencies(
             score_file,
             audio_path,
         )
-        return (*audio_fingerprint, score_fingerprint)
+        return (*audio_fingerprint, score_request.dependency_fingerprint)
 
     @classmethod
     def VALIDATE_INPUTS(cls, audio):
@@ -439,7 +389,7 @@ class MusicalLoadAudioUI:
         path_exists = False
         if audio_path is not None:
             try:
-                path_exists = os.path.exists(audio_path)
+                path_exists = os.path.isfile(audio_path)
             except (OSError, ValueError):
                 path_exists = False
 
@@ -481,67 +431,24 @@ class MusicalLoadAudioUI:
         diagnostics_values = []
         if fallback_warning is not None:
             diagnostics_values.append(
-                _diagnostic(
+                diagnostic(
                     "score_provider_error",
                     "warning",
                     f"{fallback_warning}; using 1 second of silence",
                 )
             )
 
-        (
-            explicit_score_path,
-            _explicit_resolution_error,
-            json_sidecar_path,
-            midi_sidecar_path,
-            score_fingerprint,
-        ) = _prepare_score_dependencies(score_file, audio_path)
-        providers = (
-            ExplicitFileProvider(
-                score_file=score_file,
-                resolved_path=explicit_score_path,
-                audio_path=audio_path,
-            ),
-            SidecarJsonProvider(
-                candidate_path=json_sidecar_path,
-                audio_path=audio_path,
-            ),
-            MidiSidecarProvider(candidate_path=midi_sidecar_path),
-            AnalysisProvider(),
-            ConstantProvider(),
-        )
+        score_request = _prepare_score_dependencies(score_file, audio_path)
         try:
-            score_resolution = resolve_provider_chain(
-                providers,
+            repository_result = resolve_score_repository(
+                score_request,
                 audio_seconds_at_tick_zero=effective_alignment,
-                dependency_fingerprint=score_fingerprint,
             )
-        except ProviderChainError as error:
-            message = "; ".join(error.diagnostics) or str(error)
-            fatal_diagnostics = _serialize_diagnostics(
-                [_diagnostic("score_provider_error", "error", message)]
-            )
-            raise ValueError(fatal_diagnostics) from None
+        except ScoreRepositoryError as error:
+            raise ValueError(serialize_diagnostics((error.diagnostic,))) from None
 
-        provider_warnings = []
-        provider_diagnostics = []
-        for message in score_resolution.diagnostics:
-            is_stale_warning = message.startswith(
-                "score_source_identity_mismatch:"
-            )
-            target = provider_warnings if is_stale_warning else provider_diagnostics
-            target.append(
-                _diagnostic(
-                    (
-                        "score_provider_error"
-                        if is_stale_warning
-                        else "score_resolver_diagnostic"
-                    ),
-                    "warning",
-                    message,
-                )
-            )
-        diagnostics_values.extend(provider_warnings)
-        diagnostics_values.extend(provider_diagnostics)
+        score_resolution = repository_result.resolution
+        diagnostics_values.extend(repository_result.diagnostics)
 
         resolver = None
         score_tempo_map = None
@@ -557,26 +464,13 @@ class MusicalLoadAudioUI:
                 audio_seconds_at_tick_zero=effective_alignment,
             )
             score_tempo_map = ScoreTempoMap(resolver)
-            diagnostics_values.extend(
-                _diagnostic(
-                    "score_resolver_diagnostic",
-                    "warning",
-                    message,
-                )
-                for message in resolver.diagnostics
+            repository_result = append_resolver_diagnostics(
+                repository_result,
+                resolver_diagnostics=resolver.diagnostics,
+                effective_alignment=effective_alignment,
             )
-            provider_alignment = score_resolution.provider_alignment_seconds
-            if (
-                provider_alignment is not None
-                and provider_alignment != effective_alignment
-            ):
-                diagnostics_values.append(
-                    _diagnostic(
-                        "score_alignment_divergence",
-                        "warning",
-                        "stored Score alignment differs from the effective node alignment; the node value remains authoritative",
-                    )
-                )
+            diagnostics_values = diagnostics_values[:1] if fallback_warning is not None else []
+            diagnostics_values.extend(repository_result.diagnostics)
 
             if score_tempo_map.supports_uniform_timing:
                 if edit_mode == "Seconds":
@@ -607,7 +501,7 @@ class MusicalLoadAudioUI:
 
         if start_not_canonical:
             diagnostics_values.append(
-                _diagnostic(
+                diagnostic(
                     "score_start_position_not_canonical",
                     "warning",
                     "requested Musical start is not canonical for the resolved Score",
@@ -615,7 +509,7 @@ class MusicalLoadAudioUI:
             )
         if activation_refused:
             diagnostics_values.append(
-                _diagnostic(
+                diagnostic(
                     "score_activation_refused",
                     "warning",
                     "resolved Score cannot control editing; constant timing remains active",
@@ -685,11 +579,7 @@ class MusicalLoadAudioUI:
             if section is not None:
                 section_name = section.name
 
-        score_format = (
-            "constant"
-            if score_resolution.resolved_score is None
-            else score_resolution.resolved_score.score.source
-        )
+        score_format = repository_result.score_format
         return (
             audio_output,
             plan.duration_seconds,
@@ -709,6 +599,6 @@ class MusicalLoadAudioUI:
             section_name,
             sample_rate,
             score_format,
-            score_resolution.provider,
-            _serialize_diagnostics(diagnostics_values),
+            repository_result.score_provider,
+            serialize_diagnostics(diagnostics_values),
         )
