@@ -6,6 +6,7 @@ from bisect import bisect_right
 
 from score.bars import round_half_away_from_zero_ratio
 from score.resolver import ScoreResolver
+from score.selection import ScoreSelectionError, resolve_score_selection
 from score.serialize import score_from_dict, sidecar_from_dict
 
 
@@ -218,27 +219,28 @@ class _AxisAdapter:
         }
 
     def duration_end(self, start_value, duration, subdivisions):
-        start = _position(start_value)
-        start_tick = self.resolver.position_to_tick(*start, subdivisions)
-        numerator, denominator = self.resolver.meter_at_bar(start[0])
-        units = ((duration["bars"] * numerator + duration["beats"]) * subdivisions
-                 + duration["subdivisions"])
-        end_tick = start_tick + round_half_away_from_zero_ratio(
-            units * 4 * self.resolver.score.ticks_per_quarter,
-            denominator * subdivisions,
-        )
-        if any(start_tick < meter.tick < end_tick for meter in self.resolver.score.meters):
-            raise TimeAxisError("score_end_position_required", "meter change inside duration")
+        start_bar, start_beat, start_subdivision = _position(start_value)
         try:
-            end = self.resolver.tick_to_position(end_tick, subdivisions)
-            if self.resolver.position_to_tick(*end, subdivisions) != end_tick:
-                raise ValueError
-        except ValueError as error:
-            raise TimeAxisError("score_selection_range_invalid", "noncanonical end") from error
+            selected = resolve_score_selection(
+                self.resolver,
+                start_bar=start_bar,
+                start_beat=start_beat,
+                start_subdivision=start_subdivision,
+                score_end_bar=0,
+                score_end_beat=0,
+                score_end_subdivision=0,
+                duration_bars=duration["bars"],
+                duration_beats=duration["beats"],
+                duration_subdivisions=duration["subdivisions"],
+                subdivisions_per_beat=subdivisions,
+            )
+        except ScoreSelectionError as error:
+            raise TimeAxisError(error.code, str(error)) from error
+        end = self.resolver.tick_to_position(selected.end_tick_exclusive, subdivisions)
         return {
             "endExclusive": _position_dict(end),
-            "startTick": start_tick,
-            "endTickExclusive": end_tick,
+            "startTick": selected.start_tick,
+            "endTickExclusive": selected.end_tick_exclusive,
             "meterStable": True,
         }
 

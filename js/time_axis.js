@@ -355,11 +355,17 @@ export function createScoreTimeAxis(normalizedReadyPayload) {
         const fields = duration(durationValue);
         const startTick = resolver.positionToTick(start, subdivisionsPerBeat);
         const meter = resolver.meterAtBar(start.bar);
-        const subdivisionUnits = (fields.bars * meter.numerator + fields.beats) * subdivisionsPerBeat + fields.subdivisions;
-        safeTick(subdivisionUnits, "duration units");
-        const numerator = subdivisionUnits * 4 * resolver.ticksPerQuarter;
-        const denominator = meter.denominator * subdivisionsPerBeat;
-        const endTick = safeTick(startTick + roundHalfAwayFromZero(numerator / denominator), "end tick");
+        const startBarTick = resolver.barToTick(start.bar);
+        const durationSubdivisionCount = (fields.bars * meter.numerator + fields.beats) * subdivisionsPerBeat + fields.subdivisions;
+        const provisionalEndSubdivisionIndex = ((start.beat - 1) * subdivisionsPerBeat + start.subdivision) + durationSubdivisionCount;
+        safeTick(provisionalEndSubdivisionIndex, "duration units");
+        const beatIndex = Math.floor(provisionalEndSubdivisionIndex / subdivisionsPerBeat);
+        const residualSubdivisionIndex = provisionalEndSubdivisionIndex - beatIndex * subdivisionsPerBeat;
+        const beatOffset = roundHalfAwayFromZero((beatIndex * 4 * resolver.ticksPerQuarter) / meter.denominator);
+        const subdivisionOffset = roundHalfAwayFromZero(
+            (residualSubdivisionIndex * 4 * resolver.ticksPerQuarter) / (meter.denominator * subdivisionsPerBeat),
+        );
+        const endTick = safeTick(startBarTick + beatOffset + subdivisionOffset, "end tick");
         const internalChange = resolver.score.meters.some((event) => startTick < event.tick && event.tick < endTick);
         if (internalChange) axisError("score_end_position_required", "meter changes inside the requested duration");
         let endPosition;

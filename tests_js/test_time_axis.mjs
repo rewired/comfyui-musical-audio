@@ -159,6 +159,34 @@ test("duration fallback is meter-stable, permits end changes, and rejects intern
     ), { name: "TimeAxisError", code: "score_end_position_required" });
 });
 
+test("duration fallback combines the start offset and duration before rounding on uneven subdivision grids", async () => {
+    const axis = await scoreAxis("constant_4_4.json");
+    const cases = [
+        {
+            start: { bar: 1, beat: 1, subdivision: 3 }, duration: { bars: 0, beats: 0, subdivisions: 3 }, subdivisionsPerBeat: 7,
+            expected: { endExclusive: { bar: 1, beat: 1, subdivision: 6 }, startTick: 206, endTickExclusive: 411, meterStable: true },
+        },
+        {
+            start: { bar: 1, beat: 1, subdivision: 6 }, duration: { bars: 0, beats: 0, subdivisions: 2 }, subdivisionsPerBeat: 7,
+            expected: { endExclusive: { bar: 1, beat: 2, subdivision: 1 }, startTick: 411, endTickExclusive: 549, meterStable: true },
+        },
+        {
+            start: { bar: 1, beat: 1, subdivision: 4 }, duration: { bars: 0, beats: 0, subdivisions: 4 }, subdivisionsPerBeat: 9,
+            expected: { endExclusive: { bar: 1, beat: 1, subdivision: 8 }, startTick: 213, endTickExclusive: 427, meterStable: true },
+        },
+        {
+            start: { bar: 1, beat: 1, subdivision: 1 }, duration: { bars: 0, beats: 0, subdivisions: 1 }, subdivisionsPerBeat: 11,
+            expected: { endExclusive: { bar: 1, beat: 1, subdivision: 2 }, startTick: 44, endTickExclusive: 87, meterStable: true },
+        },
+    ];
+    for (const { start, duration, subdivisionsPerBeat, expected } of cases) {
+        assert.deepEqual(axis.durationToCanonicalEnd(start, duration, subdivisionsPerBeat), expected);
+    }
+    const firstCase = cases[0];
+    const firstResult = axis.durationToCanonicalEnd(firstCase.start, firstCase.duration, firstCase.subdivisionsPerBeat);
+    assert.notEqual(firstResult.endTickExclusive, 412);
+});
+
 test("TimeAxis operations match the shared golden corpus", async () => {
     const corpus = JSON.parse(await readFile(join(root, "tests", "fixtures", "score_timing_golden_v1.json"), "utf8"));
     const operations = new Set([
