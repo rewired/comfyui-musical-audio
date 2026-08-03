@@ -457,6 +457,56 @@ class ScoreResolverTests(unittest.TestCase):
                 with self.subTest(method=method.__name__, value=value), self.assertRaises((TypeError, ValueError)):
                     method(value)
 
+    def test_containing_bar_ticks_cached_extrapolated_and_boundaries(self):
+        resolver = resolver_for(duration=0.0)
+        self.assertEqual(resolver.containing_bar_ticks(0), (0, 1920))
+        self.assertEqual(resolver.containing_bar_ticks(1919.5), (0, 1920))
+        self.assertEqual(resolver.containing_bar_ticks(1920), (1920, 3840))
+        far = resolver.bar_to_tick(100_000)
+        self.assertEqual(
+            resolver.containing_bar_ticks(far),
+            (far, resolver.bar_to_tick(100_001)),
+        )
+
+    def test_containing_bar_ticks_shortened_and_negative(self):
+        shortened = resolver_for(load_fixture("midbar_meter.json"), duration=0.0)
+        self.assertEqual(shortened.containing_bar_ticks(999), (0, 1000))
+        self.assertEqual(shortened.containing_bar_ticks(1000), (1000, 2440))
+        resolver = resolver_for()
+        self.assertEqual(resolver.containing_bar_ticks(-1), (-1920, 0))
+        self.assertEqual(resolver.containing_bar_ticks(-1920), (-1920, 0))
+        self.assertEqual(resolver.containing_bar_ticks(-1920.1), (-3840, -1920))
+
+    def test_containing_beat_ticks_boundaries_shortening_and_odd_meter(self):
+        resolver = resolver_for()
+        self.assertEqual(resolver.containing_beat_ticks(0), (0, 480))
+        self.assertEqual(resolver.containing_beat_ticks(480), (480, 960))
+        shortened = resolver_for(load_fixture("midbar_meter.json"), duration=0.0)
+        self.assertEqual(shortened.containing_beat_ticks(999), (960, 1000))
+        odd = resolver_for(load_fixture("odd_meter_31_32.json"), duration=0.0)
+        self.assertEqual(odd.containing_beat_ticks(0), (0, 60))
+        self.assertEqual(odd.containing_beat_ticks(60), (60, 120))
+
+    def test_containing_beat_ticks_negative_and_input_validation(self):
+        resolver = resolver_for()
+        self.assertEqual(resolver.containing_beat_ticks(-1), (-480, 0))
+        self.assertEqual(resolver.containing_beat_ticks(-480), (-480, 0))
+        self.assertEqual(resolver.containing_beat_ticks(-480.1), (-960, -480))
+        for method in (resolver.containing_bar_ticks, resolver.containing_beat_ticks):
+            for value in (True, "0", math.nan, math.inf, -math.inf):
+                with self.subTest(method=method.__name__, value=value), self.assertRaises((TypeError, ValueError)):
+                    method(value)
+
+    def test_containing_intervals_accept_large_float_representable_integers(self):
+        resolver = resolver_for(duration=0.0)
+        for method in (resolver.containing_bar_ticks, resolver.containing_beat_ticks):
+            for value in (10**300, -(10**300)):
+                with self.subTest(method=method.__name__, value=value):
+                    start_tick, end_tick = method(value)
+                    self.assertLessEqual(start_tick, value)
+                    self.assertLess(value, end_tick)
+                    self.assertLess(start_tick, end_tick)
+
     def test_position_input_validation(self):
         resolver = resolver_for()
         cases = (
@@ -625,6 +675,8 @@ class ScoreResolverTests(unittest.TestCase):
             "audio_seconds_to_tick",
             "bar_to_tick",
             "bar_length_ticks",
+            "containing_bar_ticks",
+            "containing_beat_ticks",
             "meter_at_bar",
             "position_to_tick",
             "tick_to_position",

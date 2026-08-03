@@ -50,6 +50,35 @@ class AudioClipPlan:
     clamped: bool
 
 
+@dataclass(frozen=True)
+class RequestedAudioRange:
+    start_seconds: float
+    end_seconds: float
+
+
+@dataclass(frozen=True)
+class SampleRangePlan:
+    requested_start_seconds: float
+    requested_end_seconds: float
+    start_sample: int
+    end_sample: int
+    start_seconds: float
+    end_seconds: float
+    duration_seconds: float
+    start_frame: int
+    frame_count: int
+    clamped: bool
+
+
+@dataclass(frozen=True)
+class ClipTimingMetadata:
+    seconds_per_beat: float
+    frames_per_beat: float
+    seconds_per_bar: float
+    frames_per_bar: float
+    musical_position: str
+
+
 def _require_positive_integer(name: str, value: object) -> None:
     if type(value) is not int:
         raise TypeError(f"{name} must be an int")
@@ -108,6 +137,101 @@ def _format_nearest_position(nearest: NearestPosition) -> str:
     return (
         f"Bar {nearest.bar} · Beat {nearest.beat} · "
         f"Subdivision {nearest.subdivision}"
+    )
+
+
+def apply_sample_range(
+    *,
+    requested_range: RequestedAudioRange,
+    sample_rate: int,
+    sample_count: int,
+    fps: float,
+) -> SampleRangePlan:
+    if type(requested_range) is not RequestedAudioRange:
+        raise TypeError("requested_range must be a RequestedAudioRange")
+    _require_positive_integer("sample_rate", sample_rate)
+    _require_positive_integer("sample_count", sample_count)
+    _require_finite_number("fps", fps)
+    if fps <= 0:
+        raise ValueError("fps must be greater than zero")
+    _require_finite_number("requested start_seconds", requested_range.start_seconds)
+    _require_finite_number("requested end_seconds", requested_range.end_seconds)
+
+    requested_start_seconds = float(requested_range.start_seconds)
+    requested_end_seconds = float(requested_range.end_seconds)
+    audio_duration = sample_count / sample_rate
+    start_sample = round_half_away_from_zero(requested_start_seconds * sample_rate)
+    end_sample = round_half_away_from_zero(requested_end_seconds * sample_rate)
+    clamped = (
+        requested_start_seconds < 0.0
+        or requested_start_seconds > audio_duration
+        or requested_end_seconds < 0.0
+        or requested_end_seconds > audio_duration
+        or requested_end_seconds < requested_start_seconds
+    )
+    start_sample = min(max(start_sample, 0), sample_count)
+    end_sample = min(max(end_sample, 0), sample_count)
+    if end_sample < start_sample:
+        end_sample = start_sample
+        clamped = True
+    if end_sample == start_sample:
+        clamped = True
+        if start_sample == sample_count:
+            start_sample = sample_count - 1
+            end_sample = sample_count
+        else:
+            end_sample = start_sample + 1
+
+    start_seconds = start_sample / sample_rate
+    end_seconds = end_sample / sample_rate
+    duration_seconds = (end_sample - start_sample) / sample_rate
+    return SampleRangePlan(
+        requested_start_seconds=requested_start_seconds,
+        requested_end_seconds=requested_end_seconds,
+        start_sample=start_sample,
+        end_sample=end_sample,
+        start_seconds=start_seconds,
+        end_seconds=end_seconds,
+        duration_seconds=duration_seconds,
+        start_frame=round_half_away_from_zero(start_seconds * fps),
+        frame_count=round_half_away_from_zero(duration_seconds * fps),
+        clamped=clamped,
+    )
+
+
+def finalize_audio_clip_plan(
+    sample_plan: SampleRangePlan,
+    metadata: ClipTimingMetadata,
+) -> AudioClipPlan:
+    if type(sample_plan) is not SampleRangePlan:
+        raise TypeError("sample_plan must be a SampleRangePlan")
+    if type(metadata) is not ClipTimingMetadata:
+        raise TypeError("metadata must be a ClipTimingMetadata")
+    for name, value in (
+        ("seconds_per_beat", metadata.seconds_per_beat),
+        ("frames_per_beat", metadata.frames_per_beat),
+        ("seconds_per_bar", metadata.seconds_per_bar),
+        ("frames_per_bar", metadata.frames_per_bar),
+    ):
+        _require_finite_number(name, value)
+    if type(metadata.musical_position) is not str:
+        raise TypeError("musical_position must be a built-in str")
+    return AudioClipPlan(
+        requested_start_seconds=sample_plan.requested_start_seconds,
+        requested_end_seconds=sample_plan.requested_end_seconds,
+        start_sample=sample_plan.start_sample,
+        end_sample=sample_plan.end_sample,
+        start_seconds=sample_plan.start_seconds,
+        end_seconds=sample_plan.end_seconds,
+        duration_seconds=sample_plan.duration_seconds,
+        start_frame=sample_plan.start_frame,
+        frame_count=sample_plan.frame_count,
+        seconds_per_beat=metadata.seconds_per_beat,
+        frames_per_beat=metadata.frames_per_beat,
+        seconds_per_bar=metadata.seconds_per_bar,
+        frames_per_bar=metadata.frames_per_bar,
+        musical_position=metadata.musical_position,
+        clamped=sample_plan.clamped,
     )
 
 
@@ -180,42 +304,21 @@ def create_audio_clip_plan(
         requested_start_seconds = timing.start_seconds
         requested_end_seconds = timing.end_seconds
 
-    start_sample = round_half_away_from_zero(
-        requested_start_seconds * sample_rate
+    sample_plan = apply_sample_range(
+        requested_range=RequestedAudioRange(
+            start_seconds=requested_start_seconds,
+            end_seconds=requested_end_seconds,
+        ),
+        sample_rate=sample_rate,
+        sample_count=sample_count,
+        fps=fps,
     )
-    end_sample = round_half_away_from_zero(
-        requested_end_seconds * sample_rate
-    )
-
-    clamped = (
-        requested_start_seconds < 0.0
-        or requested_start_seconds > audio_duration
-        or requested_end_seconds < 0.0
-        or requested_end_seconds > audio_duration
-        or requested_end_seconds < requested_start_seconds
-    )
-    start_sample = min(max(start_sample, 0), sample_count)
-    end_sample = min(max(end_sample, 0), sample_count)
-
-    if end_sample < start_sample:
-        end_sample = start_sample
-        clamped = True
-
-    if end_sample == start_sample:
-        clamped = True
-        if start_sample == sample_count:
-            start_sample = sample_count - 1
-            end_sample = sample_count
-        else:
-            end_sample = start_sample + 1
-
-    start_seconds = start_sample / sample_rate
-    end_seconds = end_sample / sample_rate
-    duration_seconds = (end_sample - start_sample) / sample_rate
-    start_frame = round_half_away_from_zero(start_seconds * fps)
-    frame_count = round_half_away_from_zero(duration_seconds * fps)
+    start_seconds = sample_plan.start_seconds
+    end_seconds = sample_plan.end_seconds
+    start_frame = sample_plan.start_frame
+    frame_count = sample_plan.frame_count
     frame_end = start_frame + frame_count
-    clamp_suffix = " | clamped to audio" if clamped else ""
+    clamp_suffix = " | clamped to audio" if sample_plan.clamped else ""
 
     if edit_mode == "Musical":
         length = _duration_label(
@@ -240,23 +343,25 @@ def create_audio_clip_plan(
             f"Frames: {start_frame}–{frame_end}{clamp_suffix}"
         )
 
-    return AudioClipPlan(
-        requested_start_seconds=requested_start_seconds,
-        requested_end_seconds=requested_end_seconds,
-        start_sample=start_sample,
-        end_sample=end_sample,
-        start_seconds=start_seconds,
-        end_seconds=end_seconds,
-        duration_seconds=duration_seconds,
-        start_frame=start_frame,
-        frame_count=frame_count,
-        seconds_per_beat=timing.seconds_per_beat,
-        frames_per_beat=timing.frames_per_beat,
-        seconds_per_bar=timing.seconds_per_bar,
-        frames_per_bar=timing.frames_per_bar,
-        musical_position=musical_position,
-        clamped=clamped,
+    return finalize_audio_clip_plan(
+        sample_plan,
+        ClipTimingMetadata(
+            seconds_per_beat=timing.seconds_per_beat,
+            frames_per_beat=timing.frames_per_beat,
+            seconds_per_bar=timing.seconds_per_bar,
+            frames_per_bar=timing.frames_per_bar,
+            musical_position=musical_position,
+        ),
     )
 
 
-__all__ = ["AudioClipPlan", "EditMode", "create_audio_clip_plan"]
+__all__ = [
+    "AudioClipPlan",
+    "ClipTimingMetadata",
+    "EditMode",
+    "RequestedAudioRange",
+    "SampleRangePlan",
+    "apply_sample_range",
+    "create_audio_clip_plan",
+    "finalize_audio_clip_plan",
+]

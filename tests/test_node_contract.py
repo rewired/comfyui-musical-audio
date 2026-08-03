@@ -9,6 +9,8 @@ import unittest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 NODE_SOURCE = REPO_ROOT / "musical_audio_ui.py"
+AUDIO_CLIP_PLAN_SOURCE = REPO_ROOT / "audio_clip_plan.py"
+SCORE_SELECTION_SOURCE = REPO_ROOT / "score" / "selection.py"
 INIT_SOURCE = REPO_ROOT / "__init__.py"
 SCORE_SUBSYSTEM = REPO_ROOT / "docs" / "SCORE_SUBSYSTEM.md"
 FRONTEND_SOURCE = REPO_ROOT / "js" / "musical_audio_ui.js"
@@ -38,6 +40,9 @@ EXPECTED_WIDGETS = (
     "subdivisions_per_beat",
     "snap_mode",
     "score_file",
+    "score_end_bar",
+    "score_end_beat",
+    "score_end_subdivision",
 )
 TARGET_WIDGET_INPUTS = (
     "bpm",
@@ -264,6 +269,24 @@ class StaticNodeContractTests(unittest.TestCase):
             ("STRING", {"default": "", "socketless": True}),
         )
 
+    def test_exact_end_widgets_are_visible_socketless_fallback_controls(self) -> None:
+        self.assertEqual(
+            _required_widget_names()[-4:],
+            (
+                "score_file",
+                "score_end_bar",
+                "score_end_beat",
+                "score_end_subdivision",
+            ),
+        )
+        for name in ("score_end_bar", "score_end_beat", "score_end_subdivision"):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    _required_input_spec(name),
+                    ("INT", {"default": 0, "min": 0, "socketless": True}),
+                )
+                self.assertNotIn(name, FRONTEND_SOURCE.read_text(encoding="utf-8"))
+
     def test_local_beat_widgets_use_the_named_practical_limit(self) -> None:
         self.assertEqual(_module_literal("MAX_LOCAL_BEATS_PER_BAR"), 64)
         self.assertEqual(
@@ -337,7 +360,12 @@ class StaticNodeContractTests(unittest.TestCase):
         positional_names = tuple(argument.arg for argument in method.args.args)
 
         self.assertIsNone(method.args.kwarg)
-        self.assertEqual(positional_names[-9], "score_file")
+        self.assertEqual(positional_names[-12:-8], (
+            "score_file",
+            "score_end_bar",
+            "score_end_beat",
+            "score_end_subdivision",
+        ))
         self.assertEqual(
             positional_names[-8:],
             (
@@ -392,7 +420,7 @@ class StaticNodeContractTests(unittest.TestCase):
 
         self.assertEqual(bare_handlers, [])
 
-    def test_duration_and_score_contract_has_only_the_frozen_phase4_additions(self) -> None:
+    def test_duration_and_score_contract_has_only_the_phase5c_input_additions(self) -> None:
         all_input_names = (*_input_group("required"), *_input_group("optional"))
         return_names = _class_literal("RETURN_NAMES")
 
@@ -401,7 +429,12 @@ class StaticNodeContractTests(unittest.TestCase):
         self.assertIn("diagnostics", return_names)
         self.assertEqual(
             tuple(name for name in all_input_names if "score" in name.lower()),
-            ("score_file",),
+            (
+                "score_file",
+                "score_end_bar",
+                "score_end_beat",
+                "score_end_subdivision",
+            ),
         )
         self.assertIn("score_file", all_input_names)
         self.assertNotIn("stems_dir", all_input_names)
@@ -428,6 +461,43 @@ class StaticNodeContractTests(unittest.TestCase):
             '"MusicalLoadAudioUI": "Load Audio UI — Musical Grid"',
             init_source,
         )
+
+    def test_phase5c_import_architecture_is_acyclic(self) -> None:
+        audio_tree = ast.parse(AUDIO_CLIP_PLAN_SOURCE.read_text(encoding="utf-8"))
+        for node in ast.walk(audio_tree):
+            if isinstance(node, ast.Import):
+                self.assertFalse(
+                    any(
+                        alias.name == "score" or alias.name.startswith("score.")
+                        for alias in node.names
+                    )
+                )
+            elif isinstance(node, ast.ImportFrom):
+                self.assertFalse(
+                    node.level == 0
+                    and node.module is not None
+                    and (node.module == "score" or node.module.startswith("score."))
+                )
+
+        selection_tree = ast.parse(SCORE_SELECTION_SOURCE.read_text(encoding="utf-8"))
+        absolute_modules = set()
+        relative_modules = set()
+        for node in ast.walk(selection_tree):
+            if isinstance(node, ast.Import):
+                absolute_modules.update(
+                    alias.name.split(".", 1)[0] for alias in node.names
+                )
+            elif isinstance(node, ast.ImportFrom):
+                target = "" if node.module is None else node.module
+                if node.level:
+                    relative_modules.add(target)
+                else:
+                    absolute_modules.add(target.split(".", 1)[0])
+        self.assertEqual(
+            absolute_modules,
+            {"__future__", "dataclasses", "math", "typing"},
+        )
+        self.assertEqual(relative_modules, {"bars", "resolver"})
 
     def test_frozen_score_document_preserves_core_markers(self) -> None:
         self.assertTrue(SCORE_SUBSYSTEM.is_file())

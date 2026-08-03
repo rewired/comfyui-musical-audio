@@ -15,7 +15,14 @@ from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from audio_clip_plan import create_audio_clip_plan as real_create_audio_clip_plan
+from audio_clip_plan import (
+    ClipTimingMetadata,
+    RequestedAudioRange,
+    SampleRangePlan,
+    apply_sample_range,
+    create_audio_clip_plan as real_create_audio_clip_plan,
+    finalize_audio_clip_plan,
+)
 from score.model import MeterEvent, ResolvedScore, Score, Section, TempoEvent
 from score.providers import ScoreResolution
 
@@ -139,7 +146,12 @@ def _load_node_module(
 
     av = ModuleType("av")
     audio_clip_plan = ModuleType("audio_clip_plan")
+    audio_clip_plan.ClipTimingMetadata = ClipTimingMetadata  # type: ignore[attr-defined]
+    audio_clip_plan.RequestedAudioRange = RequestedAudioRange  # type: ignore[attr-defined]
+    audio_clip_plan.SampleRangePlan = SampleRangePlan  # type: ignore[attr-defined]
+    audio_clip_plan.apply_sample_range = apply_sample_range  # type: ignore[attr-defined]
     audio_clip_plan.create_audio_clip_plan = planner  # type: ignore[attr-defined]
+    audio_clip_plan.finalize_audio_clip_plan = finalize_audio_clip_plan  # type: ignore[attr-defined]
 
     name = f"_phase4b_node_{id(planner)}_{id(folder_paths)}"
     spec = importlib.util.spec_from_file_location(name, NODE_SOURCE)
@@ -181,6 +193,9 @@ def _inputs(**overrides: object) -> dict[str, object]:
         "subdivisions_per_beat": 4,
         "snap_mode": "Off",
         "score_file": "",
+        "score_end_bar": 0,
+        "score_end_beat": 0,
+        "score_end_subdivision": 0,
     }
     values.update(overrides)
     return values
@@ -198,8 +213,13 @@ def _run(
     if isinstance(planner, Mock) and plan is not None:
         planner.return_value = plan
     chain = None
+    chain_mock = None
     if resolution is not None:
-        chain = patch("score.runtime.resolve_provider_chain", return_value=resolution)
+        chain_mock = Mock(return_value=resolution)
+        chain = patch.dict(
+            module.resolve_score_repository.__globals__,
+            {"resolve_provider_chain": chain_mock},
+        )
     decoder = Mock(return_value=(FakeTensor((2, 960_000)), 48_000))
     stdout = io.StringIO()
     contexts = [
@@ -212,13 +232,13 @@ def _run(
         if chain is None:
             result = module.MusicalLoadAudioUI().load_audio(**_inputs(**overrides))
         else:
-            with contexts[2] as chain_mock:
+            with contexts[2]:
                 result = module.MusicalLoadAudioUI().load_audio(**_inputs(**overrides))
     return SimpleNamespace(
         result=result,
         stdout=stdout.getvalue(),
         decoder=decoder,
-        chain=chain_mock if chain is not None else None,
+        chain=chain_mock,
     )
 
 
@@ -228,7 +248,15 @@ class ContractAndPathTests(unittest.TestCase):
         input_types = module.MusicalLoadAudioUI.INPUT_TYPES()
         required = tuple(input_types["required"])
 
-        self.assertEqual(required[-1], "score_file")
+        self.assertEqual(
+            required[-4:],
+            (
+                "score_file",
+                "score_end_bar",
+                "score_end_beat",
+                "score_end_subdivision",
+            ),
+        )
         self.assertEqual(
             input_types["required"]["score_file"],
             ("STRING", {"default": "", "socketless": True}),
@@ -523,7 +551,7 @@ class FingerprintTests(unittest.TestCase):
 
 
 class AlignmentAndActivationTests(unittest.TestCase):
-    def test_external_alignment_reaches_chain_resolver_map_and_planner_once(self) -> None:
+    def test_external_alignment_reaches_complete_score_planning_once(self) -> None:
         planner = Mock(return_value=_plan())
         module = _load_node_module(planner)
         run = _run(
@@ -532,12 +560,8 @@ class AlignmentAndActivationTests(unittest.TestCase):
             downbeat_offset=7.0,
             downbeat_offset_input=-0.5,
         )
-        tempo_map = planner.call_args.kwargs["tempo_map"]
-
         self.assertEqual(run.chain.call_args.kwargs["audio_seconds_at_tick_zero"], -0.5)
-        self.assertEqual(tempo_map.resolver.audio_seconds_at_tick_zero, -0.5)
-        self.assertEqual(tempo_map.binding.alignment_seconds, -0.5)
-        self.assertEqual(planner.call_args.kwargs["downbeat_offset"], -0.5)
+        planner.assert_not_called()
         self.assertEqual(json.loads(run.result[19]), [])
 
     def test_divergent_typed_alignment_warns_without_addition_or_refusal(self) -> None:
@@ -555,25 +579,25 @@ class AlignmentAndActivationTests(unittest.TestCase):
         ).result
         values = json.loads(result[19])
 
-        self.assertEqual(planner.call_args.kwargs["downbeat_offset"], -0.25)
-        self.assertEqual(planner.call_args.kwargs["tempo_map"].binding.alignment_seconds, -0.25)
+        planner.assert_not_called()
         self.assertEqual([value["code"] for value in values], ["score_alignment_divergence"])
 
-    def test_uniform_seconds_uses_score_map_and_neutral_timing_start(self) -> None:
+    def test_seconds_ignores_unused_musical_fields_without_fake_start(self) -> None:
         planner = Mock(return_value=_plan())
         module = _load_node_module(planner)
-        _run(
+        result = _run(
             module,
             resolution=_resolution(_score(numerator=3), provider="explicit"),
             edit_mode="Seconds",
             start_bar="unused",
-            start_beat=4,
+            start_beat=99,
             start_subdivision=object(),
-        )
-        values = planner.call_args.kwargs
-
-        self.assertIsNotNone(values["tempo_map"])
-        self.assertEqual((values["start_bar"], values["start_beat"], values["start_subdivision"]), (1, 1, 0))
+            duration_bars="unused",
+            duration_beats=-1,
+            duration_subdivisions=object(),
+        ).result
+        planner.assert_not_called()
+        self.assertEqual(len(result), 20)
 
     def test_uniform_musical_uses_original_score_canonical_start(self) -> None:
         planner = Mock(return_value=_plan())
@@ -585,31 +609,33 @@ class AlignmentAndActivationTests(unittest.TestCase):
             beats_per_bar=3,
             start_beat=4,
         )
-        values = planner.call_args.kwargs
-        self.assertIsNotNone(values["tempo_map"])
-        self.assertEqual(values["start_beat"], 4)
+        planner.assert_not_called()
 
-    def test_noncanonical_musical_start_refuses_without_resolver_exception(self) -> None:
+    def test_noncanonical_musical_start_is_a_fatal_structural_error(self) -> None:
         cases = (
+            {"start_bar": 0},
+            {"start_bar": True},
             {"start_beat": 4},
             {"start_subdivision": 4},
+            {"subdivisions_per_beat": True},
             {"subdivisions_per_beat": 1_000},
         )
         for overrides in cases:
             with self.subTest(overrides=overrides):
                 planner = Mock(return_value=_plan())
                 module = _load_node_module(planner)
-                result = _run(
-                    module,
-                    resolution=_resolution(_score(numerator=3), provider="explicit"),
-                    edit_mode="Musical",
-                    **overrides,
-                ).result
-                self.assertIsNone(planner.call_args.kwargs["tempo_map"])
+                with self.assertRaises(ValueError) as caught:
+                    _run(
+                        module,
+                        resolution=_resolution(_score(numerator=3), provider="explicit"),
+                        edit_mode="Musical",
+                        **overrides,
+                    )
                 self.assertEqual(
-                    [value["code"] for value in json.loads(result[19])],
-                    ["score_start_position_not_canonical", "score_activation_refused"],
+                    [value["code"] for value in json.loads(str(caught.exception))],
+                    ["score_selection_range_invalid"],
                 )
+                planner.assert_not_called()
 
     def test_duration_overflow_does_not_refuse_uniform_score(self) -> None:
         planner = Mock(return_value=_plan())
@@ -622,10 +648,9 @@ class AlignmentAndActivationTests(unittest.TestCase):
             duration_beats=99,
             duration_subdivisions=101,
         )
-        self.assertIsNotNone(planner.call_args.kwargs["tempo_map"])
-        self.assertEqual(planner.call_args.kwargs["duration_beats"], 99)
+        planner.assert_not_called()
 
-    def test_every_nonuniform_shape_is_display_only_without_partial_metrics(self) -> None:
+    def test_every_nonuniform_shape_has_complete_score_authority(self) -> None:
         scores = (
             _score(tempos=(TempoEvent(0, 500_000), TempoEvent(480, 600_000))),
             _score(
@@ -646,9 +671,12 @@ class AlignmentAndActivationTests(unittest.TestCase):
                     module,
                     resolution=_resolution(score, provider="explicit"),
                 ).result
-                self.assertIsNone(planner.call_args.kwargs["tempo_map"])
+                planner.assert_not_called()
                 self.assertEqual(result[17:19], (score.source, "explicit"))
-                self.assertEqual(json.loads(result[19])[-1]["code"], "score_activation_refused")
+                self.assertNotIn(
+                    "score_activation_refused",
+                    [value["code"] for value in json.loads(result[19])],
+                )
 
     def test_constant_editing_applies_legacy_clamp_after_activation_decision(self) -> None:
         planner = Mock(return_value=_plan())
@@ -706,9 +734,10 @@ class SectionAndDiagnosticsTests(unittest.TestCase):
         result = _run(
             module,
             resolution=_resolution(_score(sections=sections), provider="explicit"),
+            start_time=0.5,
         ).result
         self.assertEqual(result[15], "After")
-        self.assertEqual(result[11], "Nearest: Bar 1 · Beat 2 · Subdivision 0")
+        self.assertIn("Nearest: Bar 1 · Beat 2 · Subdivision 0", result[11])
 
     def test_clamped_active_and_display_only_queries_use_returned_time(self) -> None:
         sections = (
@@ -739,8 +768,8 @@ class SectionAndDiagnosticsTests(unittest.TestCase):
 
     def test_clamped_active_musical_query_uses_returned_time(self) -> None:
         sections = (
-            Section("Returned", 0, 480, True),
-            Section("Requested", 480, 3840, True),
+            Section("Requested", 0, 480, True),
+            Section("Returned", 960, 1440, True),
         )
         planner = Mock(
             return_value=_plan(
@@ -754,7 +783,8 @@ class SectionAndDiagnosticsTests(unittest.TestCase):
             module,
             resolution=_resolution(_score(sections=sections), provider="explicit"),
             edit_mode="Musical",
-            start_bar=2,
+            start_bar=1,
+            downbeat_offset=-1.0,
         ).result
         self.assertEqual(result[15], "Returned")
 
@@ -822,14 +852,12 @@ class SectionAndDiagnosticsTests(unittest.TestCase):
                 "score_resolver_diagnostic",
                 "score_resolver_diagnostic",
                 "score_alignment_divergence",
-                "score_activation_refused",
             ],
         )
         self.assertEqual(values[2]["message"], values[3]["message"])
         self.assertLessEqual(len(values[2]["message"]), 200)
         self.assertTrue(values[2]["message"].endswith("..."))
         allowed = {
-            "score_activation_refused",
             "score_alignment_divergence",
             "score_provider_error",
             "score_start_position_not_canonical",
@@ -852,7 +880,7 @@ class SectionAndDiagnosticsTests(unittest.TestCase):
             module,
             resolution=_resolution(_score(source="midi"), provider="midi_sidecar"),
         ).result
-        self.assertEqual(result[14], 20)
+        self.assertEqual(result[14], 24)
         self.assertEqual(result[16], 48_000)
         self.assertEqual(result[17:19], ("midi", "midi_sidecar"))
 

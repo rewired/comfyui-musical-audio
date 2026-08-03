@@ -4,7 +4,15 @@ from dataclasses import FrozenInstanceError
 import math
 import unittest
 
-from audio_clip_plan import AudioClipPlan, create_audio_clip_plan
+from audio_clip_plan import (
+    AudioClipPlan,
+    ClipTimingMetadata,
+    RequestedAudioRange,
+    SampleRangePlan,
+    apply_sample_range,
+    create_audio_clip_plan,
+    finalize_audio_clip_plan,
+)
 
 
 BASE_INPUTS = {
@@ -237,6 +245,72 @@ class RoundingAndOutputTests(unittest.TestCase):
 
         with self.assertRaises(FrozenInstanceError):
             result.start_sample = 2  # type: ignore[misc]
+
+
+class NeutralSampleLayerTests(unittest.TestCase):
+    def test_value_types_are_frozen(self) -> None:
+        requested = RequestedAudioRange(0.0, 1.0)
+        sample = apply_sample_range(
+            requested_range=requested,
+            sample_rate=100,
+            sample_count=100,
+            fps=24.0,
+        )
+        metadata = ClipTimingMetadata(0.5, 12.0, 2.0, 48.0, "position")
+        for value, field in (
+            (requested, "start_seconds"),
+            (sample, "start_sample"),
+            (metadata, "seconds_per_beat"),
+        ):
+            with self.subTest(value=type(value).__name__), self.assertRaises(FrozenInstanceError):
+                setattr(value, field, 99)
+
+    def test_apply_sample_range_matches_reversed_equal_and_eof_behavior(self) -> None:
+        cases = (
+            (RequestedAudioRange(3.0, 2.0), (300, 301)),
+            (RequestedAudioRange(0.5, 0.5), (50, 51)),
+            (RequestedAudioRange(20.0, 30.0), (999, 1000)),
+        )
+        for requested, expected in cases:
+            with self.subTest(requested=requested):
+                result = apply_sample_range(
+                    requested_range=requested,
+                    sample_rate=100,
+                    sample_count=1000,
+                    fps=24.0,
+                )
+                self.assertEqual((result.start_sample, result.end_sample), expected)
+                self.assertTrue(result.clamped)
+
+    def test_finalize_copies_without_recalculation(self) -> None:
+        sample = SampleRangePlan(1.0, 2.0, 10, 20, 1.1, 1.9, 0.8, 27, 19, True)
+        metadata = ClipTimingMetadata(0.3, 7.2, 1.1, 26.4, "exact")
+        result = finalize_audio_clip_plan(sample, metadata)
+        self.assertEqual(result.start_seconds, 1.1)
+        self.assertEqual(result.start_frame, 27)
+        self.assertEqual(result.frames_per_bar, 26.4)
+        self.assertEqual(result.musical_position, "exact")
+
+    def test_neutral_api_rejects_wrong_dataclass_and_domains(self) -> None:
+        with self.assertRaises(TypeError):
+            apply_sample_range(
+                requested_range=(0.0, 1.0),  # type: ignore[arg-type]
+                sample_rate=100,
+                sample_count=100,
+                fps=24.0,
+            )
+        for name, value in (("sample_rate", 0), ("sample_count", 0), ("fps", math.inf)):
+            arguments = dict(
+                requested_range=RequestedAudioRange(0.0, 1.0),
+                sample_rate=100,
+                sample_count=100,
+                fps=24.0,
+            )
+            arguments[name] = value
+            with self.subTest(name=name), self.assertRaises((TypeError, ValueError)):
+                apply_sample_range(**arguments)
+        with self.assertRaises(TypeError):
+            finalize_audio_clip_plan(object(), ClipTimingMetadata(1, 1, 1, 1, "x"))  # type: ignore[arg-type]
 
 
 class ValidationTests(unittest.TestCase):

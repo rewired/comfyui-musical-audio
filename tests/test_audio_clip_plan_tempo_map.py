@@ -127,6 +127,14 @@ class ActiveBridgeAndLegacyParityTests(unittest.TestCase):
         self.assertEqual(bridge.span_calls, 1)
         self.assertEqual(bridge.nearest_calls, [(result.start_seconds, 4)])
 
+    def test_compatibility_wrapper_calls_neutral_sample_layer_once(self) -> None:
+        from audio_clip_plan import apply_sample_range
+
+        with patch("audio_clip_plan.apply_sample_range", wraps=apply_sample_range) as sample_layer:
+            result = plan(start_time=0.25, end_time=0.75)
+        sample_layer.assert_called_once()
+        self.assertEqual((result.start_sample, result.end_sample), (250, 750))
+
     def test_musical_mode_does_not_describe_nearest_position(self) -> None:
         bridge = RecordingBridge(ConstantTempoMap(120.0, "Quarter", 4, 4))
         plan(

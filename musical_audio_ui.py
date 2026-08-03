@@ -5,7 +5,13 @@ import torch
 import av
 
 try:
-    from .audio_clip_plan import create_audio_clip_plan
+    from .audio_clip_plan import (
+        ClipTimingMetadata,
+        RequestedAudioRange,
+        apply_sample_range,
+        create_audio_clip_plan,
+        finalize_audio_clip_plan,
+    )
     from .score.providers import select_section
     from .score.resolver import ScoreResolver
     from .score.routes import _resolve_comfy_path
@@ -18,9 +24,19 @@ try:
         resolve_score_repository,
         serialize_diagnostics,
     )
-    from .score.tempo_map import ScoreTempoMap
+    from .score.selection import (
+        ScoreSelectionError,
+        resolve_score_selection,
+        selection_start_score_tick,
+    )
 except ImportError:  # Support direct module loading outside the package.
-    from audio_clip_plan import create_audio_clip_plan
+    import audio_clip_plan as _audio_clip_plan
+
+    create_audio_clip_plan = _audio_clip_plan.create_audio_clip_plan
+    ClipTimingMetadata = getattr(_audio_clip_plan, "ClipTimingMetadata", None)
+    RequestedAudioRange = getattr(_audio_clip_plan, "RequestedAudioRange", None)
+    apply_sample_range = getattr(_audio_clip_plan, "apply_sample_range", None)
+    finalize_audio_clip_plan = getattr(_audio_clip_plan, "finalize_audio_clip_plan", None)
     from score.providers import select_section
     from score.resolver import ScoreResolver
     from score.routes import _resolve_comfy_path
@@ -33,7 +49,11 @@ except ImportError:  # Support direct module loading outside the package.
         resolve_score_repository,
         serialize_diagnostics,
     )
-    from score.tempo_map import ScoreTempoMap
+    from score.selection import (
+        ScoreSelectionError,
+        resolve_score_selection,
+        selection_start_score_tick,
+    )
 
 
 _EXTERNAL_INPUT_MISSING = object()
@@ -144,29 +164,121 @@ def _finite_float(name, value):
     return result
 
 
-def _score_start_is_canonical(
-    resolver,
-    start_bar,
-    start_beat,
-    start_subdivision,
+def _validate_score_planning_inputs(
+    *,
+    edit_mode,
+    bpm,
+    tempo_unit,
+    beats_per_bar,
+    beat_unit,
+    fps,
     subdivisions_per_beat,
 ):
-    if type(start_bar) is not int or start_bar < 1:
-        return False
-    numerator, denominator = resolver.meter_at_bar(start_bar)
-    if type(start_beat) is not int or not 1 <= start_beat <= numerator:
-        return False
-    if type(subdivisions_per_beat) is not int or subdivisions_per_beat < 1:
-        return False
-    if (
-        type(start_subdivision) is not int
-        or not 0 <= start_subdivision < subdivisions_per_beat
-    ):
-        return False
-    return (
-        subdivisions_per_beat * denominator
-        <= 4 * resolver.score.ticks_per_quarter
+    if type(edit_mode) is not str:
+        raise TypeError("edit_mode must be a str")
+    if edit_mode not in ("Seconds", "Musical"):
+        raise ValueError("edit_mode must be 'Seconds' or 'Musical'")
+    for name, value in (("bpm", bpm), ("fps", fps)):
+        numeric = _finite_float(name, value)
+        if numeric <= 0:
+            raise ValueError(f"{name} must be greater than zero")
+    if type(tempo_unit) is not str:
+        raise TypeError("tempo_unit must be a str")
+    if tempo_unit not in ("Quarter", "Eighth", "Dotted Quarter"):
+        raise ValueError("tempo_unit is unsupported")
+    integer_values = (
+        ("beats_per_bar", beats_per_bar, 1),
+        ("beat_unit", beat_unit, 1),
     )
+    for name, value, minimum in integer_values:
+        if type(value) is not int:
+            raise TypeError(f"{name} must be an int")
+        if value < minimum:
+            raise ValueError(f"{name} must be at least {minimum}")
+    if edit_mode == "Seconds":
+        if type(subdivisions_per_beat) is not int:
+            raise TypeError("subdivisions_per_beat must be an int")
+        if subdivisions_per_beat < 1:
+            raise ValueError("subdivisions_per_beat must be at least 1")
+
+
+def _duration_label(duration_bars, duration_beats, duration_subdivisions):
+    parts = []
+    for value, singular, plural in (
+        (duration_bars, "Bar", "Bars"),
+        (duration_beats, "Beat", "Beats"),
+        (duration_subdivisions, "Subdivision", "Subdivisions"),
+    ):
+        if value:
+            parts.append(f"{value} {singular if value == 1 else plural}")
+    return " + ".join(parts) if parts else "0 Beats"
+
+
+def _round_half_away(value):
+    fractional, integral = math.modf(value)
+    if fractional >= 0.5:
+        integral += 1
+    elif fractional <= -0.5:
+        integral -= 1
+    return int(integral)
+
+
+def _score_nearest_text(resolver, anchor_tick, subdivisions_per_beat):
+    if anchor_tick >= 0:
+        bar, beat, subdivision = resolver.tick_to_position(
+            anchor_tick,
+            subdivisions_per_beat,
+        )
+        return f"Bar {bar} · Beat {beat} · Subdivision {subdivision}"
+    _numerator, denominator = resolver.meter_at_bar(1)
+    if subdivisions_per_beat * denominator > 4 * resolver.score.ticks_per_quarter:
+        raise ValueError("subdivision grid is finer than integer tick resolution")
+    signed = _round_half_away(
+        anchor_tick
+        * denominator
+        * subdivisions_per_beat
+        / (4 * resolver.score.ticks_per_quarter)
+    )
+    if signed == 0:
+        return "Bar 1 · Beat 1 · Subdivision 0"
+    return f"{-signed} subdivisions before Bar 1 · Beat 1"
+
+
+def _score_musical_position(
+    *,
+    edit_mode,
+    selection,
+    resolver,
+    sample_plan,
+    subdivisions_per_beat,
+):
+    frame_end = sample_plan.start_frame + sample_plan.frame_count
+    clamp_suffix = " | clamped to audio" if sample_plan.clamped else ""
+    time_and_frames = (
+        f"Time: {sample_plan.start_seconds:.3f}–{sample_plan.end_seconds:.3f} s | "
+        f"Frames: {sample_plan.start_frame}–{frame_end}{clamp_suffix}"
+    )
+    if edit_mode == "Musical":
+        start = selection.start_position
+        if selection.mode == "exact":
+            end = selection.exact_end_position
+            return (
+                f"Bar {start.bar} · Beat {start.beat} · Subdivision {start.subdivision} | "
+                f"End (exclusive): Bar {end.bar} · Beat {end.beat} · "
+                f"Subdivision {end.subdivision} | {time_and_frames}"
+            )
+        length = _duration_label(
+            selection.duration_bars,
+            selection.duration_beats,
+            selection.duration_subdivisions,
+        )
+        return (
+            f"Bar {start.bar} · Beat {start.beat} · Subdivision {start.subdivision} | "
+            f"Length: {length} | {time_and_frames}"
+        )
+    nearest_tick = resolver.audio_seconds_to_tick(sample_plan.start_seconds)
+    nearest = _score_nearest_text(resolver, nearest_tick, subdivisions_per_beat)
+    return f"Seconds mode | Nearest: {nearest} | {time_and_frames}"
 
 
 def f32_pcm(wav: torch.Tensor) -> torch.Tensor:
@@ -255,6 +367,18 @@ class MusicalLoadAudioUI:
                 "score_file": (
                     "STRING",
                     {"default": "", "socketless": True},
+                ),
+                "score_end_bar": (
+                    "INT",
+                    {"default": 0, "min": 0, "socketless": True},
+                ),
+                "score_end_beat": (
+                    "INT",
+                    {"default": 0, "min": 0, "socketless": True},
+                ),
+                "score_end_subdivision": (
+                    "INT",
+                    {"default": 0, "min": 0, "socketless": True},
                 ),
             },
             "optional": {
@@ -355,6 +479,9 @@ class MusicalLoadAudioUI:
         subdivisions_per_beat,
         snap_mode,
         score_file,
+        score_end_bar=0,
+        score_end_beat=0,
+        score_end_subdivision=0,
         audioUI=None,
         bpm_input=_EXTERNAL_INPUT_MISSING,
         tempo_unit_input=_EXTERNAL_INPUT_MISSING,
@@ -451,11 +578,8 @@ class MusicalLoadAudioUI:
         diagnostics_values.extend(repository_result.diagnostics)
 
         resolver = None
-        score_tempo_map = None
-        active_score_map = None
-        musical_start_tick = None
-        activation_refused = False
-        start_not_canonical = False
+        anchor = None
+        selection = None
         if score_resolution.resolved_score is not None:
             resolved_score = score_resolution.resolved_score
             resolver = ScoreResolver(
@@ -463,7 +587,6 @@ class MusicalLoadAudioUI:
                 audio_duration_seconds=waveform.shape[-1] / sample_rate,
                 audio_seconds_at_tick_zero=effective_alignment,
             )
-            score_tempo_map = ScoreTempoMap(resolver)
             repository_result = append_resolver_diagnostics(
                 repository_result,
                 resolver_diagnostics=resolver.diagnostics,
@@ -472,86 +595,125 @@ class MusicalLoadAudioUI:
             diagnostics_values = diagnostics_values[:1] if fallback_warning is not None else []
             diagnostics_values.extend(repository_result.diagnostics)
 
-            if score_tempo_map.supports_uniform_timing:
-                if edit_mode == "Seconds":
-                    active_score_map = score_tempo_map
-                elif edit_mode == "Musical":
-                    if _score_start_is_canonical(
-                        resolver,
-                        start_bar,
-                        start_beat,
-                        start_subdivision,
-                        effective_subdivisions_per_beat,
-                    ):
-                        musical_start_tick = resolver.position_to_tick(
-                            start_bar,
-                            start_beat,
-                            start_subdivision,
-                            effective_subdivisions_per_beat,
-                        )
-                        active_score_map = score_tempo_map
-                    else:
-                        start_not_canonical = True
-                        activation_refused = True
-                else:
-                    # The clip planner remains the edit-mode domain authority.
-                    active_score_map = score_tempo_map
-            else:
-                activation_refused = True
-
-        if start_not_canonical:
-            diagnostics_values.append(
-                diagnostic(
-                    "score_start_position_not_canonical",
-                    "warning",
-                    "requested Musical start is not canonical for the resolved Score",
-                )
-            )
-        if activation_refused:
-            diagnostics_values.append(
-                diagnostic(
-                    "score_activation_refused",
-                    "warning",
-                    "resolved Score cannot control editing; constant timing remains active",
-                )
-            )
-
-        planner_start_bar = start_bar
-        planner_start_beat = start_beat
-        planner_start_subdivision = start_subdivision
-        if active_score_map is not None and edit_mode == "Seconds":
-            planner_start_bar = 1
-            planner_start_beat = 1
-            planner_start_subdivision = 0
-        elif active_score_map is None:
+        if resolver is None:
+            planner_start_beat = start_beat
             if (
                 type(start_beat) is int
                 and type(effective_beats_per_bar) is int
                 and effective_beats_per_bar >= 1
             ):
                 planner_start_beat = min(start_beat, effective_beats_per_bar)
+            plan = create_audio_clip_plan(
+                edit_mode=edit_mode,
+                sample_rate=sample_rate,
+                sample_count=waveform.shape[-1],
+                start_time=start_time,
+                end_time=end_time,
+                bpm=effective_bpm,
+                tempo_unit=effective_tempo_unit,
+                beats_per_bar=effective_beats_per_bar,
+                beat_unit=effective_beat_unit,
+                downbeat_offset=effective_alignment,
+                fps=effective_fps,
+                start_bar=start_bar,
+                start_beat=planner_start_beat,
+                start_subdivision=start_subdivision,
+                duration_bars=duration_bars,
+                duration_beats=duration_beats,
+                duration_subdivisions=duration_subdivisions,
+                subdivisions_per_beat=effective_subdivisions_per_beat,
+            )
+        else:
+            _validate_score_planning_inputs(
+                edit_mode=edit_mode,
+                bpm=effective_bpm,
+                tempo_unit=effective_tempo_unit,
+                beats_per_bar=effective_beats_per_bar,
+                beat_unit=effective_beat_unit,
+                fps=effective_fps,
+                subdivisions_per_beat=effective_subdivisions_per_beat,
+            )
+            if edit_mode == "Musical":
+                try:
+                    selection = resolve_score_selection(
+                        resolver,
+                        start_bar=start_bar,
+                        start_beat=start_beat,
+                        start_subdivision=start_subdivision,
+                        score_end_bar=score_end_bar,
+                        score_end_beat=score_end_beat,
+                        score_end_subdivision=score_end_subdivision,
+                        duration_bars=duration_bars,
+                        duration_beats=duration_beats,
+                        duration_subdivisions=duration_subdivisions,
+                        subdivisions_per_beat=effective_subdivisions_per_beat,
+                    )
+                except ScoreSelectionError as error:
+                    raise ValueError(
+                        serialize_diagnostics(
+                            (diagnostic(error.code, "error", error.message),)
+                        )
+                    ) from None
+                requested_range = RequestedAudioRange(
+                    selection.requested_start_seconds,
+                    selection.requested_end_seconds,
+                )
+                musical_start_tick = selection.start_tick
+            else:
+                requested_start = _finite_float("start_time", start_time)
+                requested_end_value = _finite_float("end_time", end_time)
+                requested_end = (
+                    waveform.shape[-1] / sample_rate
+                    if requested_end_value <= 0
+                    else requested_end_value
+                )
+                requested_range = RequestedAudioRange(
+                    requested_start,
+                    requested_end,
+                )
+                musical_start_tick = None
 
-        plan = create_audio_clip_plan(
-            edit_mode=edit_mode,
-            sample_rate=sample_rate,
-            sample_count=waveform.shape[-1],
-            start_time=start_time,
-            end_time=end_time,
-            bpm=effective_bpm,
-            tempo_unit=effective_tempo_unit,
-            beats_per_bar=effective_beats_per_bar,
-            beat_unit=effective_beat_unit,
-            downbeat_offset=effective_alignment,
-            fps=effective_fps,
-            start_bar=planner_start_bar,
-            start_beat=planner_start_beat,
-            start_subdivision=planner_start_subdivision,
-            duration_bars=duration_bars,
-            duration_beats=duration_beats,
-            duration_subdivisions=duration_subdivisions,
-            subdivisions_per_beat=effective_subdivisions_per_beat,
-            tempo_map=active_score_map,
-        )
+            sample_plan = apply_sample_range(
+                requested_range=requested_range,
+                sample_rate=sample_rate,
+                sample_count=waveform.shape[-1],
+                fps=effective_fps,
+            )
+            anchor = selection_start_score_tick(
+                resolver,
+                edit_mode=edit_mode,
+                clamped=sample_plan.clamped,
+                requested_start_seconds=sample_plan.requested_start_seconds,
+                returned_start_seconds=sample_plan.start_seconds,
+                musical_start_tick=musical_start_tick,
+            )
+            bar_start_tick, bar_end_tick = resolver.containing_bar_ticks(anchor)
+            beat_start_tick, beat_end_tick = resolver.containing_beat_ticks(anchor)
+            seconds_per_bar = (
+                resolver.tick_to_seconds(bar_end_tick)
+                - resolver.tick_to_seconds(bar_start_tick)
+            )
+            seconds_per_beat = (
+                resolver.tick_to_seconds(beat_end_tick)
+                - resolver.tick_to_seconds(beat_start_tick)
+            )
+            musical_position = _score_musical_position(
+                edit_mode=edit_mode,
+                selection=selection,
+                resolver=resolver,
+                sample_plan=sample_plan,
+                subdivisions_per_beat=effective_subdivisions_per_beat,
+            )
+            plan = finalize_audio_clip_plan(
+                sample_plan,
+                ClipTimingMetadata(
+                    seconds_per_beat=seconds_per_beat,
+                    frames_per_beat=seconds_per_beat * effective_fps,
+                    seconds_per_bar=seconds_per_bar,
+                    frames_per_bar=seconds_per_bar * effective_fps,
+                    musical_position=musical_position,
+                ),
+            )
 
         # Trim the waveform tensor -> shape: [channels, time]
         trimmed_waveform = waveform[:, plan.start_sample:plan.end_sample]
@@ -562,20 +724,7 @@ class MusicalLoadAudioUI:
         out_filename = "" if audio == "none" or not path_exists else os.path.basename(audio)
         section_name = ""
         if resolver is not None:
-            if (
-                active_score_map is not None
-                and edit_mode == "Musical"
-                and not plan.clamped
-            ):
-                section_query_tick = musical_start_tick
-            else:
-                query_seconds = (
-                    plan.start_seconds
-                    if plan.clamped
-                    else plan.requested_start_seconds
-                )
-                section_query_tick = resolver.audio_seconds_to_tick(query_seconds)
-            section = select_section(resolver.sections(), section_query_tick)
+            section = select_section(resolver.sections(), anchor)
             if section is not None:
                 section_name = section.name
 

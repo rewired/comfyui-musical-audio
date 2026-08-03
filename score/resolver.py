@@ -356,6 +356,103 @@ class ScoreResolver:
         )
         return meter.numerator, meter.denominator
 
+    def containing_bar_ticks(self, tick: int | float) -> tuple[int, int]:
+        value = _require_query_real(tick, "tick")
+        if value >= 0:
+            bar = self._bar_containing_tick(value)
+            return self.bar_to_tick(bar), self.bar_to_tick(bar + 1)
+
+        meter = self._bar_grid.meters_by_bar[0]
+        width_numerator = meter.numerator * 4 * self.score.ticks_per_quarter
+        estimate = self._estimate_index(
+            value,
+            meter.denominator,
+            width_numerator,
+        )
+        candidates = tuple(
+            (
+                absolute_boundary(
+                    anchor_tick=0,
+                    bar_index=index,
+                    meter=meter,
+                    ticks_per_quarter=self.score.ticks_per_quarter,
+                ),
+                index,
+            )
+            for index in range(estimate - 3, estimate + 4)
+        )
+        eligible = tuple(item for item in candidates if item[0] <= value)
+        if not eligible:
+            raise ValueError("negative tick-to-bar lookup was inconsistent")
+        start_tick, index = max(eligible)
+        end_tick = absolute_boundary(
+            anchor_tick=0,
+            bar_index=index + 1,
+            meter=meter,
+            ticks_per_quarter=self.score.ticks_per_quarter,
+        )
+        if not start_tick <= value < end_tick or start_tick >= end_tick:
+            raise ValueError("negative tick-to-bar lookup was inconsistent")
+        return start_tick, end_tick
+
+    def containing_beat_ticks(self, tick: int | float) -> tuple[int, int]:
+        value = _require_query_real(tick, "tick")
+        if value < 0:
+            meter = self._bar_grid.meters_by_bar[0]
+            width_numerator = 4 * self.score.ticks_per_quarter
+            estimate = self._estimate_index(
+                value,
+                meter.denominator,
+                width_numerator,
+            )
+            candidates = tuple(
+                (
+                    round_half_away_from_zero_ratio(
+                        index * width_numerator,
+                        meter.denominator,
+                    ),
+                    index,
+                )
+                for index in range(estimate - 3, estimate + 4)
+            )
+            eligible = tuple(item for item in candidates if item[0] <= value)
+            if not eligible:
+                raise ValueError("negative tick-to-beat lookup was inconsistent")
+            start_tick, index = max(eligible)
+            end_tick = round_half_away_from_zero_ratio(
+                (index + 1) * width_numerator,
+                meter.denominator,
+            )
+            if not start_tick <= value < end_tick or start_tick >= end_tick:
+                raise ValueError("negative tick-to-beat lookup was inconsistent")
+            return start_tick, end_tick
+
+        bar = self._bar_containing_tick(value)
+        bar_start = self.bar_to_tick(bar)
+        bar_end = self.bar_to_tick(bar + 1)
+        numerator, denominator = self.meter_at_bar(bar)
+        relative = value - bar_start
+        estimate = self._estimate_index(
+            relative,
+            denominator,
+            4 * self.score.ticks_per_quarter,
+        )
+        for beat_index in range(max(0, estimate - 2), min(numerator, estimate + 3)):
+            start_tick = bar_start + round_half_away_from_zero_ratio(
+                beat_index * 4 * self.score.ticks_per_quarter,
+                denominator,
+            )
+            end_tick = min(
+                bar_end,
+                bar_start + round_half_away_from_zero_ratio(
+                    (beat_index + 1) * 4 * self.score.ticks_per_quarter,
+                    denominator,
+                ),
+            )
+            if start_tick <= value < end_tick and start_tick < end_tick:
+                return start_tick, end_tick
+        raise ValueError("tick does not lie in an actual Beat interval")
+
     def position_to_tick(
         self,
         bar: int,

@@ -2,6 +2,7 @@
 
 from contextlib import redirect_stdout
 import importlib.util
+import inspect
 import io
 import json
 from pathlib import Path
@@ -10,7 +11,14 @@ from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from audio_clip_plan import create_audio_clip_plan as real_create_audio_clip_plan
+from audio_clip_plan import (
+    ClipTimingMetadata,
+    RequestedAudioRange,
+    SampleRangePlan,
+    apply_sample_range,
+    create_audio_clip_plan as real_create_audio_clip_plan,
+    finalize_audio_clip_plan,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -75,7 +83,12 @@ def _load_node_module(planner: object) -> ModuleType:
 
     av = ModuleType("av")
     audio_clip_plan = ModuleType("audio_clip_plan")
+    audio_clip_plan.ClipTimingMetadata = ClipTimingMetadata  # type: ignore[attr-defined]
+    audio_clip_plan.RequestedAudioRange = RequestedAudioRange  # type: ignore[attr-defined]
+    audio_clip_plan.SampleRangePlan = SampleRangePlan  # type: ignore[attr-defined]
+    audio_clip_plan.apply_sample_range = apply_sample_range  # type: ignore[attr-defined]
     audio_clip_plan.create_audio_clip_plan = planner  # type: ignore[attr-defined]
+    audio_clip_plan.finalize_audio_clip_plan = finalize_audio_clip_plan  # type: ignore[attr-defined]
 
     spec = importlib.util.spec_from_file_location(
         "_musical_audio_ui_output_contract",
@@ -160,6 +173,22 @@ def _load_audio(module: ModuleType, **overrides: object) -> tuple[object, ...]:
 
 
 class LoadAudioOutputContractTests(unittest.TestCase):
+    def test_legacy_callers_receive_unset_exact_end_defaults(self) -> None:
+        module = _load_node_module(Mock(return_value=_plan()))
+        signature = inspect.signature(module.MusicalLoadAudioUI.load_audio)
+        self.assertEqual(
+            tuple(
+                signature.parameters[name].default
+                for name in (
+                    "score_end_bar",
+                    "score_end_beat",
+                    "score_end_subdivision",
+                )
+            ),
+            (0, 0, 0),
+        )
+        self.assertEqual(len(_load_audio(module)), 20)
+
     def test_local_values_are_used_when_external_inputs_are_absent(self) -> None:
         source = NODE_SOURCE.read_text(encoding="utf-8")
         self.assertIn("serialize_diagnostics", source)
